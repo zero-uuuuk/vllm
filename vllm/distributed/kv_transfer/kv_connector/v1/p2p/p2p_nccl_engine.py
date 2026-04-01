@@ -170,6 +170,9 @@ class P2pNcclEngine:
 
         self.buffer_size = 0
         self.buffer_size_threshold = float(self.config.kv_buffer_size)
+        self.recv_timeout_s = float(
+            self.config.get_from_extra_config("recv_timeout_s", 300)
+        )
 
         self.nccl_num_channels = self.config.get_from_extra_config(
             "nccl_num_channels", "8"
@@ -314,7 +317,13 @@ class P2pNcclEngine:
             start_time = time.time()
             with self.recv_store_cv:
                 while tensor_id not in self.recv_store:
-                    self.recv_store_cv.wait()
+                    if not self.recv_store_cv.wait(timeout=self.recv_timeout_s):
+                        if tensor_id not in self.recv_store:
+                            logger.warning(
+                                "⏰[PUT]Recv timeout after %.1fs, tensor_id:%s, rank:%d",
+                                self.recv_timeout_s, tensor_id, self.rank,
+                            )
+                            return None
                 tensor = self.recv_store[tensor_id]
 
             if tensor is not None:

@@ -49,8 +49,20 @@ def parse_args():
     parser.add_argument(
         "--kv-host",
         type=str,
-        default="localhost",
-        help="Hostname or IP used by KV transfer (default: localhost)",
+        default=None,
+        help="Hostname or IP used by KV transfer for both nodes (default: derived from service URL)",
+    )
+    parser.add_argument(
+        "--prefill-kv-host",
+        type=str,
+        default=None,
+        help="Hostname or IP for prefill KV transfer (overrides --kv-host)",
+    )
+    parser.add_argument(
+        "--decode-kv-host",
+        type=str,
+        default=None,
+        help="Hostname or IP for decode KV transfer (overrides --kv-host)",
     )
     parser.add_argument(
         "--prefill-kv-port",
@@ -78,8 +90,17 @@ def main():
     DECODE_SERVICE_URL = args.decode_url
     PORT = args.port
 
-    PREFILL_KV_ADDR = f"{args.kv_host}:{args.prefill_kv_port}"
-    DECODE_KV_ADDR = f"{args.kv_host}:{args.decode_kv_port}"
+    def _resolve_kv_host(explicit, shared, service_url):
+        if explicit:
+            return explicit
+        if shared:
+            return shared
+        return urlparse(service_url).hostname or "localhost"
+
+    prefill_kv_host = _resolve_kv_host(args.prefill_kv_host, args.kv_host, args.prefill_url)
+    decode_kv_host = _resolve_kv_host(args.decode_kv_host, args.kv_host, args.decode_url)
+    PREFILL_KV_ADDR = f"{prefill_kv_host}:{args.prefill_kv_port}"
+    DECODE_KV_ADDR = f"{decode_kv_host}:{args.decode_kv_port}"
 
     logger.info(
         "Proxy resolved KV addresses -> prefill: %s, decode: %s",

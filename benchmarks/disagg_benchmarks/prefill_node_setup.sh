@@ -38,9 +38,9 @@ ray start --head --node-ip-address "$PREFILL_IP" --port 6379
 echo "Waiting for Decode Node to join the Ray Cluster..."
 echo "Please run 'decode_node_setup.sh' on the Decode Node now."
 
-until [ "$(ray list nodes --output json 2>/dev/null | jq '. | length' 2>/dev/null || echo 0)" -ge 2 ] 2>/dev/null; do
+until [ "$(ray status 2>/dev/null | grep -c '^ [0-9]* node_')" -ge 2 ] 2>/dev/null; do
     sleep 5
-    echo "... Waiting for worker node (Current node count: $(ray list nodes --output json 2>/dev/null | jq '. | length' 2>/dev/null || echo 'unknown'))"
+    echo "... Waiting for worker node (Current node count: $(ray status 2>/dev/null | grep -c '^ [0-9]* node_'))"
 done
 echo "Ray Cluster is fully formed!"
 ray status

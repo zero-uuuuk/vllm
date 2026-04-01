@@ -52,7 +52,7 @@ echo "Launching vLLM Prefill Service on $PREFILL_IP..."
 CUDA_VISIBLE_DEVICES=0 vllm serve "$MODEL" \
     --port 8100 \
     --max-model-len 10000 \
-    --gpu-memory-utilization 0.8 \
+    --gpu-memory-utilization 0.7 \
     --quantization awq \
     --no-enable-chunked-prefill \
     --kv-transfer-config \
@@ -125,3 +125,12 @@ done
 
 echo "Benchmarks completed successfully."
 echo "Results stored in: $RESULT_DIR"
+echo ""
+echo "========================================"
+echo "All benchmarks done. Proxy and vLLM servers are still running."
+echo "Decode node may still be processing. Do NOT terminate this node yet."
+echo "When ready to stop, press Ctrl+C or run: pkill -f 'vllm serve'; pkill -f 'disagg_prefill_proxy_server.py'"
+echo "========================================"
+
+# Keep script alive so trap cleanup does not fire prematurely
+wait

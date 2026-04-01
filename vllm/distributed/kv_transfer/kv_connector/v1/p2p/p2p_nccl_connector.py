@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -103,6 +104,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
             if role == KVConnectorRole.WORKER
             else None
         )
+        # [INSTRUMENTATION] request_id -> perf_counter at first layer enqueue
+        self._kv_send_start: dict[str, float] = {}
 
     # ==============================
     # Worker-side methods
@@ -302,6 +305,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
             remote_address = ip + ":" + str(port + self._rank)
 
             kv_cache = extract_kv_from_layer(kv_layer, request.block_ids)
+            # [INSTRUMENTATION] record start time on first layer send per request
+            if request_id not in self._kv_send_start:
+                self._kv_send_start[request_id] = time.perf_counter()
             self.p2p_nccl_engine.send_tensor(
                 request_id + "#" + layer_name, kv_cache, remote_address
             )
@@ -310,6 +316,14 @@ class P2pNcclConnector(KVConnectorBase_V1):
         if self.is_producer:
             assert self.p2p_nccl_engine is not None
             self.p2p_nccl_engine.wait_for_sent()
+            # [INSTRUMENTATION] log KV transfer time per request
+            for req_id, start in list(self._kv_send_start.items()):
+                logger.info(
+                    "⏱️KV transfer time: %.3fs, request_id:%s",
+                    time.perf_counter() - start,
+                    req_id,
+                )
+            self._kv_send_start.clear()
 
     def get_finished(
         self, finished_req_ids: set[str], **kwargs: Any

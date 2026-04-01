@@ -39,7 +39,7 @@ echo "Launching vLLM Decode Service on port 8200..."
 CUDA_VISIBLE_DEVICES=0 vllm serve "$MODEL" \
     --port 8200 \
     --max-model-len 10000 \
-    --gpu-memory-utilization 0.8 \
+    --gpu-memory-utilization 0.7 \
     --quantization awq \
     --no-enable-chunked-prefill \
     --kv-transfer-config \

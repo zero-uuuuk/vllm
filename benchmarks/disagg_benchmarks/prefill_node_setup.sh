@@ -45,7 +45,7 @@ done
 echo "Ray Cluster is fully formed!"
 ray status
 
-export NCCL_COMM_TIMEOUT=60
+export VLLM_DISABLE_REQUEST_ID_RANDOMIZATION=1
 
 # --- 5. Launch vLLM Prefill Service ---
 echo "Launching vLLM Prefill Service on $PREFILL_IP..."

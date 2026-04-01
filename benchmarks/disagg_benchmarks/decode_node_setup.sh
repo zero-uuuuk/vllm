@@ -29,7 +29,7 @@ echo "Connecting to Ray Head at $PREFILL_IP:6379..."
 ray start --address "$PREFILL_IP:6379"
 echo "Successfully requested connection to Ray Cluster."
 
-export NCCL_COMM_TIMEOUT=60
+export VLLM_DISABLE_REQUEST_ID_RANDOMIZATION=1
 
 # --- 4. Launch vLLM Decode Service ---
 # vLLM Decode 서비스를 기동합니다. (KV Cache Consumer 역할)

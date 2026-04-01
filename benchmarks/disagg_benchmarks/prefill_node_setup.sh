@@ -89,7 +89,7 @@ python3 disagg_prefill_proxy_server.py \
 sleep 5
 
 # --- 7. Benchmark Loop ---
-LAMBDAS=(1 2 4 8)
+LAMBDAS=(1 2 3 4 6 8 12 16)
 CASES=("case1" "case2")
 
 for case in "${CASES[@]}"; do
@@ -102,25 +102,42 @@ for case in "${CASES[@]}"; do
     echo "Running Workload: $case (Input: $input_len, Output: $output_len)"
     echo "========================================"
 
+    saturated=0
     for lambda in "${LAMBDAS[@]}"; do
         echo "Running with Lambda: $lambda"
-        
+
         vllm bench serve \
             --model "$MODEL" \
             --dataset-name random \
             --random-input-len "$input_len" \
             --random-output-len "$output_len" \
             --random-range-ratio 0.0 \
-            --num-prompts 100 \
+            --num-prompts 200 \
             --request-rate "$lambda" \
             --seed 42 \
             --port 8000 \
+            --metric-percentiles "95,99" \
             --save-result \
             --result-dir "$RESULT_DIR" \
             --result-filename "${case}_lambda${lambda}.json"
-        
+
         echo "Finished Lambda $lambda"
+
+        result_file="${RESULT_DIR}/${case}_lambda${lambda}.json"
+        mean_tpot=$(jq '.mean_tpot_ms' "$result_file")
+        p95_tpot=$(jq '.p95_tpot_ms' "$result_file")
+
+        if [ "$(echo "$mean_tpot * 2 <= $p95_tpot" | bc)" -eq 1 ]; then
+            echo "$lambda" > "${RESULT_DIR}/${case}_selected_lambda.txt"
+            echo "Saturation detected at lambda=$lambda. Stopping early for $case."
+            saturated=1
+            break
+        fi
     done
+
+    if [ "$saturated" -eq 0 ]; then
+        echo "WARNING: No saturation detected for $case after all lambdas exhausted."
+    fi
 done
 
 echo "Benchmarks completed successfully."

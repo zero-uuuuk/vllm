@@ -162,6 +162,12 @@ KVConnectorFactory.register_connector(
 )
 
 KVConnectorFactory.register_connector(
+    "BatchedNcclConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.p2p.batched_nccl_connector",
+    "BatchedNcclConnector",
+)
+
+KVConnectorFactory.register_connector(
     "LMCacheConnectorV1",
     "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector",
     "LMCacheConnectorV1",

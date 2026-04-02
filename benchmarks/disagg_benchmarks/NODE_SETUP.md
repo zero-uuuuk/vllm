@@ -101,7 +101,7 @@ done
 
 주요 옵션:
 - `--no-enable-chunked-prefill`: chunked prefill이 활성화되면 KV 전송이 마지막 chunk 완료 후에야 시작됨. 비활성화하면 프롬프트 전체를 한 번에 처리하므로 KV 전송이 즉시 시작되고 동작이 단순해짐.
-- `--gpu-memory-utilization 0.7`: `recv_store` 버퍼는 vLLM 메모리 계산 밖에서 런타임에 동적으로 GPU 메모리를 추가 점유함. 0.8로 설정하면 vLLM이 80%를 점유한 상태에서 recv_store 버퍼 1.5GB가 추가로 올라오면서 OOM이 발생함. 0.7로 낮춰 여유 공간을 확보함.
+- `--gpu-memory-utilization 0.7`: `recv_store` 버퍼는 vLLM 메모리 계산 밖에서 런타임에 동적으로 GPU 메모리를 추가 점유함. 0.8로 설정하면 vLLM이 80%를 점유한 상태에서 recv_store 버퍼 2.5GB가 추가로 올라오면서 OOM이 발생함. 0.7로 낮춰 여유 공간을 확보함.
 - `mem_pool_size_gb: 8`: `recv_store` 누적 크기가 `kv_buffer_size`를 초과하면 GPU 대신 CPU 메모리 풀로 fallback함. 기능은 정상 동작하지만 CPU↔GPU 복사 오버헤드가 발생함. 이 값은 fallback 풀의 최대 크기.
 
 서버 준비 확인은 `curl http://localhost:8100/v1/completions`로 폴링함. Decode 서버(`DECODE_IP:8200`)도 동일하게 폴링하여 양쪽이 모두 준비된 후 진행함.

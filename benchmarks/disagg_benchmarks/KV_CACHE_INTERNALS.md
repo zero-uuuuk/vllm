@@ -149,14 +149,14 @@ Decode 서버 GPU 메모리
 │  │  모델 가중치  │  CUDA graph  │    KV cache pages     │ │
 │  └───────────────┴──────────────┴───────────────────────┘ │
 ├──────────────────────────────────────────────────────────┤
-│   recv_store 버퍼 (kv_buffer_size=1.5e9, ~1.5GB)           │ ← vLLM 계산 밖
+│   recv_store 버퍼 (kv_buffer_size=2.5e9, ~2.5GB)           │ ← vLLM 계산 밖
 │   런타임에 동적 할당                                       │
 └──────────────────────────────────────────────────────────┘
 ```
 
 `recv_store` 누적 크기가 `kv_buffer_size`를 초과하면 CPU 메모리 풀(`mem_pool_size_gb`)로 fallback됨. CPU↔GPU 복사 오버헤드가 발생하여 TPOT가 튐.
 
-`gpu_memory_utilization=0.8`로 설정하면 vLLM 80% + recv_store 1.5GB가 합산되어 OOM 발생. **0.7로 설정하여 여유 공간 확보.**
+`gpu_memory_utilization=0.8`로 설정하면 vLLM 80% + recv_store 2.5GB가 합산되어 OOM 발생. **0.7로 설정하여 여유 공간 확보.**
 
 ---
 

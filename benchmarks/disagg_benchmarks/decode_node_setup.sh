@@ -44,7 +44,7 @@ CUDA_VISIBLE_DEVICES=0 vllm serve "$MODEL" \
     --quantization awq \
     --no-enable-chunked-prefill \
     --kv-transfer-config \
-    "{\"kv_connector\":\"BatchedNcclConnector\",\"kv_role\":\"kv_consumer\",\"kv_rank\":1,\"kv_parallel_size\":2,\"kv_buffer_size\":1.5e9,\"kv_ip\":\"${PREFILL_IP}\",\"kv_port\":14580,\"kv_connector_extra_config\":{\"mem_pool_size_gb\":8,\"kv_granularity\":${KV_GRANULARITY}}}" > decode_server.log 2>&1 &
+    "{\"kv_connector\":\"BatchedNcclConnector\",\"kv_role\":\"kv_consumer\",\"kv_rank\":1,\"kv_parallel_size\":2,\"kv_buffer_size\":2.5e9,\"kv_ip\":\"${PREFILL_IP}\",\"kv_port\":14580,\"kv_connector_extra_config\":{\"mem_pool_size_gb\":8,\"kv_granularity\":${KV_GRANULARITY}}}" > decode_server.log 2>&1 &
 
 echo "-------------------------------------------------------"
 echo "Decode Service is running in the background."

@@ -61,7 +61,7 @@ Prefill 설정 예시:
 
 ```bash
 --kv-transfer-config \
-"{\"kv_connector\":\"P2pNcclConnector\",\"kv_role\":\"kv_producer\",\"kv_rank\":0,\"kv_parallel_size\":2,\"kv_buffer_size\":1e9,\"kv_ip\":\"${DECODE_IP}\",\"kv_port\":14579,\"kv_connector_extra_config\":{\"mem_pool_size_gb\":8}}"
+"{\"kv_connector\":\"BatchedNcclConnector\",\"kv_role\":\"kv_producer\",\"kv_rank\":0,\"kv_parallel_size\":2,\"kv_buffer_size\":1.5e9,\"kv_ip\":\"${DECODE_IP}\",\"kv_port\":14579,\"kv_connector_extra_config\":{\"mem_pool_size_gb\":8,\"kv_granularity\":${KV_GRANULARITY}}}"
 ```
 
 `kv_ip`에 `localhost`나 `127.0.0.1`을 그대로 두면 상대 노드에 도달하지 못해 KV 전송이 무한 대기 상태에 빠짐.
@@ -82,13 +82,13 @@ export VLLM_DISABLE_REQUEST_ID_RANDOMIZATION=1
 
 `--gpu-memory-utilization 0.8`로 설정하면 런타임에 OOM이 발생함.
 
-`gpu_memory_utilization`은 vLLM이 점유할 GPU 메모리 비율로, 모델 가중치/CUDA graph/KV cache 페이지 풀이 모두 이 안에 포함됨. 그런데 `P2pNcclEngine`의 `recv_store` 버퍼(`kv_buffer_size=1e9`, 1GB)는 이 계산 **밖**에서 런타임에 동적으로 GPU 메모리를 추가 점유함.
+`gpu_memory_utilization`은 vLLM이 점유할 GPU 메모리 비율로, 모델 가중치/CUDA graph/KV cache 페이지 풀이 모두 이 안에 포함됨. 그런데 `P2pNcclEngine`의 `recv_store` 버퍼(`kv_buffer_size=1.5e9`, 1.5GB)는 이 계산 **밖**에서 런타임에 동적으로 GPU 메모리를 추가 점유함.
 
 ```
-실제 GPU 사용량 = vLLM (gpu_memory_utilization%) + recv_store 버퍼 (최대 1GB)
+실제 GPU 사용량 = vLLM (gpu_memory_utilization%) + recv_store 버퍼 (최대 1.5GB)
 ```
 
-**해결**: `--gpu-memory-utilization 0.7`로 낮춰 recv_store 버퍼가 올라올 여유 공간을 확보함.
+**해결**: `--gpu-memory-utilization 0.7`으로 낮춰 recv_store 버퍼가 올라올 여유 공간을 확보함.
 
 ## 5. vLLM은 이미 layer-wise 전송이었음
 
@@ -96,13 +96,13 @@ export VLLM_DISABLE_REQUEST_ID_RANDOMIZATION=1
 
 Prefill 서버는 forward pass 중 레이어를 실행할 때마다 `save_kv_layer()`가 호출되어 해당 레이어의 KV Cache를 즉시 전송함. 즉, granularity=1(layer-wise)이 기본 동작임.
 
-이 사실을 확인한 후 유진에게 전달하였으며, 실험 설계의 "granularity 비교(1/8/32)" 항목을 재검토할 필요가 있음.
+이를 기반으로 `BatchedNcclConnector`를 구현하여 granularity=1/8/32를 설정할 수 있도록 확장함.
 
 ## 6. CPU Fallback으로 인한 TPOT 노이즈 — Lambda 상한 제한
 
 `recv_store` 누적 크기가 `kv_buffer_size`를 초과하면 KV Cache가 CPU 메모리 풀로 fallback됨. 이 경우 CPU↔GPU 복사 오버헤드가 발생하여 TPOT가 부하와 무관하게 튀어, saturation point를 찾기 어려워짐.
 
-**해결**: lambda를 **2 이하**로 제한하여 fallback이 발생하지 않는 부하 범위 내에서 실험함.
+**해결**: `kv_buffer_size`를 `1.5e9`로 늘리고, lambda를 **2 이하**로 제한하여 fallback이 발생하지 않는 부하 범위 내에서 실험함.
 
 > [!NOTE]
 > `mem_pool_size_gb: 8`은 fallback 풀의 크기를 늘려 OOM을 방지하지만, fallback 자체를 막지는 않음. 근본적인 해결은 부하를 낮추거나 `kv_buffer_size`를 늘리는 것.

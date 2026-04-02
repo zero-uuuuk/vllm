@@ -541,6 +541,15 @@ class P2pNcclEngine:
 
         self.send(comm, tensor.to(self.device), rank ^ 1, self.send_stream)
 
+        # NOTE: This log is in the shared engine layer, so it fires for ALL
+        # connectors that use P2pNcclEngine (P2pNcclConnector, BatchedNcclConnector, etc.).
+        logger.info(
+            "⏱️KV send: ts=%.3f, tensor_id:%s, rank:%d",
+            time.time(),
+            item.tensor_id,
+            self.rank,
+        )
+
         if self.send_type == "PUT_ASYNC":
             self.have_sent_tensor_id(item.tensor_id)
 

@@ -108,9 +108,6 @@ class BatchedNcclConnector(P2pNcclConnector):
         ip, port = self.parse_request_id(request_id, True)
         remote_address = f"{ip}:{port + self._rank}"
 
-        if request_id not in self._kv_send_start:
-            self._kv_send_start[request_id] = time.perf_counter()
-
         kvs = [kv for _, kv in self._layer_buffer[request_id]]
         merged = torch.cat(kvs, dim=0)
 
@@ -187,6 +184,11 @@ class BatchedNcclConnector(P2pNcclConnector):
                 tensor_id = f"{request_id}#batch_{batch_idx}"
                 merged = self.p2p_nccl_engine.recv_tensor(
                     tensor_id, remote_address
+                )
+                logger.info(
+                    "⏱️KV recv: ts=%.3f, tensor_id:%s",
+                    time.time(),
+                    tensor_id,
                 )
 
                 if merged is None:

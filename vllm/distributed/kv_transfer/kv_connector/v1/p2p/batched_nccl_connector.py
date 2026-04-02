@@ -239,6 +239,11 @@ class BatchedNcclConnector(P2pNcclConnector):
         if merged.shape[0] == 2:
             per_layer = merged.shape[1] // num_layers
             return merged.split(per_layer, dim=1)
+        # FlashAttention concat: _extract_kv uses kv_layer[:, block_ids, ...]
+        # which preserves dim0=2 per layer, so after concat dim0 = 2*num_layers
+        if merged.shape[0] == 2 * num_layers:
+            per_layer = merged.shape[0] // num_layers
+            return merged.split(per_layer, dim=0)
         return (merged,)
 
     @staticmethod

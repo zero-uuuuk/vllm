@@ -10,6 +10,7 @@ set -e
 PREFILL_IP=${PREFILL_IP:-"127.0.0.1"}
 DECODE_IP=${DECODE_IP:-"127.0.0.1"}
 MODEL="hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4"
+KV_GRANULARITY=${KV_GRANULARITY:-1}
 
 # --- 1. Environment & Dependency Setup ---
 echo "Checking dependencies..."
@@ -56,7 +57,7 @@ CUDA_VISIBLE_DEVICES=0 vllm serve "$MODEL" \
     --quantization awq \
     --no-enable-chunked-prefill \
     --kv-transfer-config \
-    "{\"kv_connector\":\"P2pNcclConnector\",\"kv_role\":\"kv_producer\",\"kv_rank\":0,\"kv_parallel_size\":2,\"kv_buffer_size\":1e9,\"kv_ip\":\"${DECODE_IP}\",\"kv_port\":14579,\"kv_connector_extra_config\":{\"mem_pool_size_gb\":8}}" > prefill_server.log 2>&1 &
+    "{\"kv_connector\":\"BatchedNcclConnector\",\"kv_role\":\"kv_producer\",\"kv_rank\":0,\"kv_parallel_size\":2,\"kv_buffer_size\":1e9,\"kv_ip\":\"${DECODE_IP}\",\"kv_port\":14579,\"kv_connector_extra_config\":{\"mem_pool_size_gb\":8,\"kv_granularity\":${KV_GRANULARITY}}}" > prefill_server.log 2>&1 &
 
 # Wait for local server
 echo "Waiting for local Prefill server at http://localhost:8100..."
@@ -89,7 +90,8 @@ python3 disagg_prefill_proxy_server.py \
 sleep 5
 
 # --- 7. Benchmark Loop ---
-LAMBDAS=(1 2 4 8)
+LAMBDA=2
+NUM_PROMPTS=500
 CASES=("case1" "case2")
 
 for case in "${CASES[@]}"; do
@@ -99,28 +101,24 @@ for case in "${CASES[@]}"; do
     fi
 
     echo "========================================"
-    echo "Running Workload: $case (Input: $input_len, Output: $output_len)"
+    echo "Running Workload: $case (Input: $input_len, Output: $output_len, Granularity: $KV_GRANULARITY)"
     echo "========================================"
 
-    for lambda in "${LAMBDAS[@]}"; do
-        echo "Running with Lambda: $lambda"
-        
-        vllm bench serve \
-            --model "$MODEL" \
-            --dataset-name random \
-            --random-input-len "$input_len" \
-            --random-output-len "$output_len" \
-            --random-range-ratio 0.0 \
-            --num-prompts 100 \
-            --request-rate "$lambda" \
-            --seed 42 \
-            --port 8000 \
-            --save-result \
-            --result-dir "$RESULT_DIR" \
-            --result-filename "${case}_lambda${lambda}.json"
-        
-        echo "Finished Lambda $lambda"
-    done
+    vllm bench serve \
+        --model "$MODEL" \
+        --dataset-name random \
+        --random-input-len "$input_len" \
+        --random-output-len "$output_len" \
+        --random-range-ratio 0.0 \
+        --num-prompts "$NUM_PROMPTS" \
+        --request-rate "$LAMBDA" \
+        --seed 42 \
+        --port 8000 \
+        --save-result \
+        --result-dir "$RESULT_DIR" \
+        --result-filename "${case}_g${KV_GRANULARITY}.json"
+
+    echo "Finished $case"
 done
 
 echo "Benchmarks completed successfully."

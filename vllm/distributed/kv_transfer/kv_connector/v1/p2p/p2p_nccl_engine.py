@@ -539,8 +539,6 @@ class P2pNcclEngine:
             )
             return False
 
-        self.send(comm, tensor.to(self.device), rank ^ 1, self.send_stream)
-
         # NOTE: This log is in the shared engine layer, so it fires for ALL
         # connectors that use P2pNcclEngine (P2pNcclConnector, BatchedNcclConnector, etc.).
         logger.info(
@@ -549,6 +547,7 @@ class P2pNcclEngine:
             item.tensor_id,
             self.rank,
         )
+        self.send(comm, tensor.to(self.device), rank ^ 1, self.send_stream)
 
         if self.send_type == "PUT_ASYNC":
             self.have_sent_tensor_id(item.tensor_id)

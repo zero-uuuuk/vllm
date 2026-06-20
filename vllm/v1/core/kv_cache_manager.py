@@ -9,6 +9,12 @@ from typing import Literal, overload
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
+# QuotaServe PR 0: KVCacheManager는 metrics_collector(= hook 정의 지점)를 받아
+# coordinator를 거쳐 BlockPool까지 전달하는 **순수 배선 경로**다. 실제 hook
+# fire는 모두 block_pool.py에서 일어난다(§4.1 NOTE). 이 파일에서 직접 hook을
+# 호출하지는 않지만, allocate_slots/cache_blocks/free는 request 객체를 가진
+# 상위 진입점이므로 PR 2/3에서 request를 block_pool hook까지 내려보내는 출발점이
+# 된다.
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -115,6 +121,10 @@ class KVCacheManager:
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        # QuotaServe PR 0: hook 정의 지점. None이면 baseline LRU와 동일.
+        # QuotaServe 모드에서는 정책 collector(KVCacheMetricsCollector 서브클래스)
+        # 가 주입되며, mode=off에서는 base collector거나 None이라 parity가 깨지지
+        # 않는다(§5.3).
         metrics_collector: KVCacheMetricsCollector | None = None,
     ) -> None:
         self.max_model_len = max_model_len
@@ -122,6 +132,7 @@ class KVCacheManager:
         self.enable_caching = enable_caching
         self.use_eagle = use_eagle
         self.log_stats = log_stats
+        # collector를 보관했다가 아래 coordinator 생성 시 그대로 넘긴다(배선).
         self.metrics_collector = metrics_collector
         # FIXME: make prefix cache stats conditional on log_stats. We still need
         # this comment because when the log stats is enabled there are still
@@ -137,6 +148,8 @@ class KVCacheManager:
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
             hash_block_size=hash_block_size,
+            # QuotaServe PR 0: collector를 coordinator → BlockPool로 전달.
+            # 이 한 줄이 hook map 전체를 BlockPool에 연결한다.
             metrics_collector=self.metrics_collector,
         )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
@@ -401,6 +414,14 @@ class KVCacheManager:
                 num_external_computed_tokens=num_external_computed_tokens,
             )
 
+        # QuotaServe PR 2/3 threading point:
+        # 여기서 request는 가용하지만, 현재 coordinator/single_type_manager는
+        # request_id만 아래로 전달한다. 그래서 BlockPool.get_new_blocks()의
+        # request 인자는 PR 0 단계에서 None으로 들어온다(=baseline 동작). PR 2/3
+        # 에서 이 호출 사슬(allocate_new_blocks → get_new_blocks)에 request 또는
+        # request.workload_id를 함께 내려보내 Hook #1(on_block_allocated, owner
+        # 부여)과 Hook #2(on_block_evicted, trigger attribution)가 실제 workload를
+        # 받도록 확장한다.
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id,
             num_tokens_need_slot,

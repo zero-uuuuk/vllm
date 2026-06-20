@@ -1,0 +1,38 @@
+# QuotaServe config — workload-aware prefix cache quota
+# QUOTASERVE_IMPLEMENTATION_PLAN.md §5.1
+#
+# 사용:
+#   QUOTA_SERVE_CONFIG=/path/to/quota_serve.yaml \
+#   QUOTA_SERVE_MODE=static \           # (선택) 아래 mode를 override
+#   QUOTA_SERVE_LOG=/path/quota.jsonl \ # (선택) eviction/tick 로그 경로
+#   vllm serve ...
+#
+# 이 파일이 없거나 mode=off면 baseline LRU와 동일하게 동작한다(§5.3 parity).
+
+quota_serve:
+  enabled: true
+  mode: "off"          # off | dry_run | static | dynamic_floor | dynamic_full
+  scan_limit: 256      # PR 4 victim 탐색 LRU 스캔 상한 (bounded scan, §8.2)
+  tick_sec: 30         # PR 6/7 dynamic feedback 주기 (DESIGN §5)
+  shadow_ttl_sec: 120  # PR 5 shadow cache 항목 TTL (§9.1)
+
+  # workload별 floor(보호 하한) / cap(누적 상한) 비율.
+  # 비율 기준 = evictable cached prefix block pool (전체 GPU block 아님, §8.2 TIP).
+  #
+  # !!! WARNING !!!
+  #   floor_ratio 초기값은 임의값 금지. Case 1의 Chat-only 정상 상태 cached
+  #   occupancy 비율을 측정해서 채운다(§5.1). 아래 값은 plan의 placeholder이며,
+  #   raw_results occupancy 시계열로 교체해야 한다. (작업 큐 §12-3)
+  workloads:
+    chat:                 # victim (multi-turn, delayed reuse) — 보호 대상
+      floor_ratio: 0.25
+      cap_ratio: 1.00
+    rag:                  # antagonist (low-reuse)
+      floor_ratio: 0.02
+      cap_ratio: 0.40
+    longctx:              # cold antagonist (prefill-heavy, low-reuse)
+      floor_ratio: 0.02
+      cap_ratio: 0.25
+    agent:                # warm antagonist (delayed self-reuse) — cap 여유 큼
+      floor_ratio: 0.15
+      cap_ratio: 0.80

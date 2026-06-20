@@ -178,6 +178,22 @@ class BlockPool:
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
 
+        # QuotaServe hook map (PR 0, QUOTASERVE_IMPLEMENTATION_PLAN.md §4.1)
+        # ------------------------------------------------------------------
+        # 모든 block lifecycle hook은 이 collector를 통해 fire되며, BlockPool이
+        # 유일한 호출 지점이다. collector가 None이거나 base 구현이면 부작용이
+        # 없어 baseline LRU와 동일하게 동작한다(mode=off parity, §5.3).
+        #
+        #   Hook #1 on_block_allocated -> get_new_blocks()        (ref_cnt 0→1)
+        #   Hook #2 on_block_evicted   -> _maybe_evict_cached_block()
+        #   Hook #3 on_block_cached    -> cache_full_blocks()      (insert 직후)
+        #   Hook #4 on_block_accessed  -> touch()                  (cache hit)
+        #   Hook #5 on_block_freed     -> free_blocks()            (ref_cnt 감소)
+        #
+        # 이 5개는 block lifecycle 전이를 관찰/attribution하는 진입점으로, PR 3의
+        # owner 부여와 evictable_cached counter의 토대다. victim 선택을 실제로
+        # 가로채는 진입점(select_victim_candidate)은 동작을 바꾸는 PR 4에서
+        # popleft_n 경로에 추가한다. PR 0에서는 LRU를 그대로 두므로 불필요하다.
         self.metrics_collector = metrics_collector
 
     def get_cached_block(
@@ -269,6 +285,13 @@ class BlockPool:
             )
             blk.block_hash = block_hash_with_group_id
             self.cached_block_hash_to_block.insert(block_hash_with_group_id, blk)
+            # ===== QuotaServe Hook #3: on_block_cached (cache 등록 순간) =====
+            # 이 insert로 block이 prefix cache에 등록된다(is_cached: F → T).
+            # PR 3의 evictable_cached counter("ref==0 and is_cached")는 이
+            # is_cached 전이에서 재평가되어야 하므로 hook을 건다. request는 이
+            # 경로에서 항상 가용하다(cache_full_blocks가 request를 받음).
+            if self.metrics_collector:
+                self.metrics_collector.on_block_cached(blk, request)
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
 
@@ -317,13 +340,25 @@ class BlockPool:
                 )
             )
 
-    def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
+    def get_new_blocks(
+        self,
+        num_blocks: int,
+        request: Request | None = None,
+    ) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
         Note that we do not check block cache in this function.
 
         Args:
             num_blocks: The number of blocks to allocate.
+            request: (QuotaServe PR 0) trigger 요청. 이 요청이 새 block을
+                필요로 해서 free queue에서 block을 끌어오고, 필요 시 cached
+                block을 evict한다. owner 부여(Hook #1 on_block_allocated)와
+                eviction trigger attribution(Hook #2 on_block_evicted)에
+                사용된다. 호출자(single_type_kv_cache_manager)가 아직 request_id
+                만 가진 경로가 있어 default는 None이며, 실제 request threading은
+                PR 2/3에서 완성된다. None이면 base collector가 인자를 무시하므로
+                동작은 기존과 동일하다.
 
         Returns:
             A list of new block.
@@ -331,38 +366,61 @@ class BlockPool:
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
+        # NOTE(QuotaServe): victim 선택은 popleft_n()이 free queue의 head부터
+        # (LRU 순) block을 pop하면서 결정된다. PR 0에서는 이 LRU 동작을 바꾸지
+        # 않는다(=baseline parity). 실제 victim 가로채기(over_cap → above_floor
+        # → fallback_lru)는 PR 4에서 동작이 바뀔 때 이 자리에 추가한다(§8). 그
+        # 전까지 "실제로 뭐가 evict됐나"는 아래 루프의 on_block_evicted(Hook #2)
+        # 가 block 단위로 이미 기록하므로 별도 진입점이 필요 없다.
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
             for block in ret:
-                self._maybe_evict_cached_block(block)
+                # popleft된 block이 cached 상태면 여기서 evict된다. trigger
+                # request를 함께 넘겨 어떤 workload가 이 eviction을 유발했는지
+                # attribution한다(Hook #2).
+                self._maybe_evict_cached_block(block, trigger_request=request)
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
+                # ===== QuotaServe Hook #1: on_block_allocated (owner 부여) =====
+                # 새로 할당된 block에 owner workload를 부여한다(PR 3). 이 시점의
+                # block은 owner가 비어 있어야(직전 eviction에서 clear) 한다.
                 if self.metrics_collector:
-                    self.metrics_collector.on_block_allocated(block)
+                    self.metrics_collector.on_block_allocated(block, request)
         else:
             for block in ret:
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
                 if self.metrics_collector:
-                    self.metrics_collector.on_block_allocated(block)
+                    self.metrics_collector.on_block_allocated(block, request)
         return ret
 
-    def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
+    def _maybe_evict_cached_block(
+        self,
+        block: KVCacheBlock,
+        trigger_request: Request | None = None,
+    ) -> bool:
         """
         If a block is cached in `cached_block_hash_to_block`, we reset its hash
         metadata and evict it from the cache.
 
         Args:
             block: The block to evict.
+            trigger_request: (QuotaServe PR 0) 이 eviction을 유발한 요청. 새
+                block이 필요해 cached block을 밀어낸 trigger workload를
+                attribution하는 데 쓰인다. 외부 evict 경로(connector의
+                evict_blocks)에서는 명시적 trigger가 없어 None이다.
 
         Returns:
             True if the block is evicted, False otherwise.
         """
-        # Clean up metrics tracking first to prevent leaks
+        # ===== QuotaServe Hook #2: on_block_evicted (trigger attribution) =====
+        # Clean up metrics tracking first to prevent leaks.
+        # block(victim) + trigger_request(가해 workload)를 함께 넘긴다. PR 3
+        # 이후 collector는 여기서 eviction을 로깅하고 block owner를 clear한다.
         if self.metrics_collector:
-            self.metrics_collector.on_block_evicted(block)
+            self.metrics_collector.on_block_evicted(block, trigger_request)
 
         block_hash = block.block_hash
         if block_hash is None:
@@ -389,35 +447,67 @@ class BlockPool:
             )
         return True
 
-    def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
+    def touch(
+        self,
+        blocks: Sequence[KVCacheBlock],
+        request: Request | None = None,
+    ) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.
 
         Args:
             blocks: A list of blocks to touch.
+            request: (QuotaServe PR 0) cache hit을 일으킨 요청(hit-side
+                workload). owner(block.workload_id)는 절대 바꾸지 않으며(§7.1),
+                PR 3에서 필요 시 hit-side workload만 별도로 기록한다. 호출자
+                (single_type_kv_cache_manager.add_new_computed_blocks)가 아직
+                request_id만 가진 경로라 default는 None이다.
         """
         for block in blocks:
             # ref_cnt=0 means this block is in the free list (i.e. eviction
             # candidate), so remove it.
+            #
+            # NOTE(QuotaServe PR 3): ref_cnt 0 → 1 전이는 block이 evictable
+            # 후보에서 빠지는 순간이다. evictable_cached counter는 이 transition
+            # 에서 -1 되어야 하지만, 그 처리는 on_block_accessed를 override하는
+            # QuotaServe collector에서 담당한다(여기서는 ref_cnt만 조정).
             if block.ref_cnt == 0 and not block.is_null:
                 self.free_block_queue.remove(block)
             block.ref_cnt += 1
+            # ===== QuotaServe Hook #4: on_block_accessed (hit-side workload) =====
             if self.metrics_collector:
-                self.metrics_collector.on_block_accessed(block)
+                self.metrics_collector.on_block_accessed(block, request)
 
-    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
+    def free_blocks(
+        self,
+        ordered_blocks: Iterable[KVCacheBlock],
+        request: Request | None = None,
+    ) -> None:
         """Free a list of blocks. The blocks should be ordered by their
         eviction priority, where the first block will be evicted first.
 
         Args:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
+            request: (QuotaServe PR 0) 이 block들을 free하는 요청. owner
+                attribution 자체는 on_block_freed가 block 단위로 처리하므로
+                필수는 아니지만, 향후 free-side workload 계측을 위해 시그니처에
+                포함한다. 호출자가 request_id만 가진 경로가 있어 default는 None.
         """
         # Materialize the iterable to allow multiple passes.
         blocks_list = list(ordered_blocks)
         for block in blocks_list:
+            # ===== QuotaServe Hook #5: on_block_freed (ref_cnt → 0 transition) =====
+            # ref_cnt 감소 전/후 값을 함께 넘긴다. new_ref_cnt == 0 이고 block이
+            # cached면 그 block은 free queue로 들어가 evictable_cached 후보가
+            # 된다. PR 3의 counter는 정확히 이 transition에서 +1 한다(§7.3).
+            prev_ref_cnt = block.ref_cnt
             block.ref_cnt -= 1
+            if self.metrics_collector:
+                self.metrics_collector.on_block_freed(
+                    block, prev_ref_cnt, block.ref_cnt
+                )
         self.free_block_queue.append_n(
             [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
         )

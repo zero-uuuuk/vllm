@@ -66,6 +66,14 @@ async def reset_encoder_cache(raw_request: Request):
     return Response(status_code=200)
 
 
+@router.post("/flush_eviction_log")
+async def flush_eviction_log(raw_request: Request):
+    """Flush pending eviction attribution events to VLLM_EVICTION_LOG."""
+    logger.info("Flushing pending eviction log events...")
+    num_flushed = await engine_client(raw_request).flush_eviction_log()
+    return {"num_flushed": num_flushed}
+
+
 def attach_router(app: FastAPI):
     if not envs.VLLM_SERVER_DEV_MODE:
         return

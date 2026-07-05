@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import atexit
+import json
+import os
+import time
 from collections.abc import Iterable, Sequence
+from pathlib import Path
 from typing import Any
 
 from vllm.distributed.kv_events import (
@@ -11,6 +16,7 @@ from vllm.distributed.kv_events import (
     KVCacheEvent,
 )
 from vllm.logger import init_logger
+from vllm.quota_serve.workload import infer_workload
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -28,6 +34,33 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+_MAX_PENDING_EVICTIONS = 200_000
+_eviction_log_path: str | None = os.environ.get("VLLM_EVICTION_LOG")
+
+
+def _open_eviction_log(path: str | None):
+    if path is None:
+        return None
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    return open(path, "a", encoding="utf-8", buffering=1)  # noqa: SIM115
+
+
+_eviction_log_file = _open_eviction_log(_eviction_log_path)
+
+
+def _log_eviction_event(event: dict[str, Any]) -> None:
+    if _eviction_log_file is not None:
+        _eviction_log_file.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+def _request_id(request: Request | None) -> str | None:
+    return request.request_id if request is not None else None
+
+
+def _request_workload(request: Request | None) -> str | None:
+    request_id = _request_id(request)
+    return infer_workload(request_id) if request_id is not None else None
 
 
 class BlockHashToBlockMap:
@@ -195,6 +228,13 @@ class BlockPool:
         # 가로채는 진입점(select_victim_candidate)은 동작을 바꾸는 PR 4에서
         # popleft_n 경로에 추가한다. PR 0에서는 LRU를 그대로 두므로 불필요하다.
         self.metrics_collector = metrics_collector
+        # VLLM_EVICTION_LOG keeps evicted cached-prefix blocks pending until the
+        # same prefix hash is cached again. At that point the event is written
+        # with reused_later=True. Any remaining pending events are flushed as
+        # reused_later=False through /flush_eviction_log or at process exit.
+        self._pending_evictions: dict[bytes, list[dict[str, Any]]] = {}
+        self._pending_evictions_count = 0
+        atexit.register(self._flush_pending_evictions)
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -284,7 +324,12 @@ class BlockPool:
                 block_hash, kv_cache_group_id
             )
             blk.block_hash = block_hash_with_group_id
+            blk.workload_tag = _request_workload(request)
+            blk.cached_request_id = request.request_id
+            blk.block_index = num_cached_blocks + i
+            blk.last_access_time = time.time()
             self.cached_block_hash_to_block.insert(block_hash_with_group_id, blk)
+            self._complete_pending_reuse(bytes(block_hash))
             # ===== QuotaServe Hook #3: on_block_cached (cache 등록 순간) =====
             # 이 insert로 block이 prefix cache에 등록된다(is_cached: F → T).
             # PR 3의 evictable_cached counter("ref==0 and is_cached")는 이
@@ -432,6 +477,7 @@ class BlockPool:
             # eviction is not needed
             return False
 
+        self._remember_eviction_event(block, block_hash, trigger_request)
         block.reset_hash()
 
         if self.enable_kv_cache_events:
@@ -446,6 +492,74 @@ class BlockPool:
                 )
             )
         return True
+
+    def _complete_pending_reuse(self, raw_hash_bytes: bytes) -> None:
+        if self._pending_evictions_count == 0:
+            return
+        pending_list = self._pending_evictions.get(raw_hash_bytes)
+        if not pending_list:
+            return
+        event = pending_list.pop(0)
+        self._pending_evictions_count -= 1
+        if not pending_list:
+            del self._pending_evictions[raw_hash_bytes]
+        event["reused_later"] = True
+        event["time_until_next_reuse"] = round(
+            time.time() - event["eviction_time"], 6
+        )
+        _log_eviction_event(event)
+
+    def _remember_eviction_event(
+        self,
+        block: KVCacheBlock,
+        block_hash: BlockHashWithGroupId,
+        trigger_request: Request | None,
+    ) -> None:
+        if _eviction_log_file is None:
+            return
+        raw_hash_bytes = bytes(get_block_hash(block_hash))
+        event: dict[str, Any] = {
+            "evicted_workload": block.workload_tag,
+            "trigger_workload": _request_workload(trigger_request),
+            "evicted_request_id": block.cached_request_id,
+            "trigger_request_id": _request_id(trigger_request),
+            "evicted_prefix_hash": raw_hash_bytes.hex(),
+            "evicted_block_index": block.block_index,
+            "evicted_block_size": self.hash_block_size,
+            "eviction_time": time.time(),
+            "last_access_time": block.last_access_time,
+            "reused_later": False,
+            "time_until_next_reuse": None,
+        }
+        if self._pending_evictions_count >= _MAX_PENDING_EVICTIONS:
+            oldest_key = next(iter(self._pending_evictions))
+            oldest_list = self._pending_evictions[oldest_key]
+            _log_eviction_event(oldest_list.pop(0))
+            self._pending_evictions_count -= 1
+            if not oldest_list:
+                del self._pending_evictions[oldest_key]
+        self._pending_evictions.setdefault(raw_hash_bytes, []).append(event)
+        self._pending_evictions_count += 1
+
+    def flush_pending_evictions(self) -> int:
+        if self._pending_evictions_count == 0:
+            if _eviction_log_file is not None:
+                _eviction_log_file.flush()
+            return 0
+
+        num_flushed = self._pending_evictions_count
+        for event_list in self._pending_evictions.values():
+            for event in event_list:
+                _log_eviction_event(event)
+        self._pending_evictions.clear()
+        self._pending_evictions_count = 0
+        if _eviction_log_file is not None:
+            _eviction_log_file.flush()
+        logger.info("Flushed %d pending eviction events.", num_flushed)
+        return num_flushed
+
+    def _flush_pending_evictions(self) -> None:
+        self.flush_pending_evictions()
 
     def touch(
         self,
@@ -475,6 +589,7 @@ class BlockPool:
             if block.ref_cnt == 0 and not block.is_null:
                 self.free_block_queue.remove(block)
             block.ref_cnt += 1
+            block.last_access_time = time.time()
             # ===== QuotaServe Hook #4: on_block_accessed (hit-side workload) =====
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block, request)
@@ -555,9 +670,15 @@ class BlockPool:
         # Remove all hashes from all blocks.
         for block in self.blocks:
             block.reset_hash()
+            block.workload_tag = None
+            block.is_counted_as_evictable_cached = False
+            block.cached_request_id = None
+            block.block_index = -1
+            block.last_access_time = 0.0
 
         if self.metrics_collector:
             self.metrics_collector.reset()
+        self.flush_pending_evictions()
 
         logger.info("Successfully reset prefix cache")
 

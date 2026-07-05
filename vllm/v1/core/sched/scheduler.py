@@ -1933,6 +1933,10 @@ class Scheduler(SchedulerInterface):
         """
         self.encoder_cache_manager.reset()
 
+    def flush_eviction_log(self) -> int:
+        """Flush pending VLLM_EVICTION_LOG events to JSONL."""
+        return self.kv_cache_manager.block_pool.flush_pending_evictions()
+
     def make_stats(
         self,
         spec_decoding_stats: SpecDecodingStats | None = None,
@@ -1999,6 +2003,7 @@ class Scheduler(SchedulerInterface):
         return spec_decoding_stats
 
     def shutdown(self) -> None:
+        self.flush_eviction_log()
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
         if self.connector is not None:

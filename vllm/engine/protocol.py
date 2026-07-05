@@ -148,6 +148,11 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def flush_eviction_log(self) -> int:
+        """Flush pending VLLM_EVICTION_LOG events."""
+        ...
+
+    @abstractmethod
     async def sleep(self, level: int = 1, mode: "PauseMode" = "abort") -> None:
         """Sleep the engine"""
         ...

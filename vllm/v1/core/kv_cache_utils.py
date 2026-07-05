@@ -126,6 +126,16 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
+    # QuotaServe metadata. These fields are kept on the physical KV block
+    # because KVCacheBlock uses slots=True and cannot accept dynamic attrs.
+    workload_tag: str | None = None
+    is_counted_as_evictable_cached: bool = False
+    # Eviction attribution metadata for VLLM_EVICTION_LOG. These are set when
+    # the block becomes a cached prefix block and used if it is later evicted.
+    cached_request_id: str | None = None
+    block_index: int = -1
+    last_access_time: float = 0.0
+
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
         return self._block_hash

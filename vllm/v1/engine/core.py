@@ -598,6 +598,10 @@ class EngineCore:
         # Reset the GPU model runner's encoder cache (physical storage)
         self.model_executor.reset_encoder_cache()
 
+    def flush_eviction_log(self) -> int:
+        """Flush pending VLLM_EVICTION_LOG events to JSONL."""
+        return self.scheduler.flush_eviction_log()
+
     def _reset_caches(self, reset_running_requests=True) -> None:
         self.reset_prefix_cache(reset_running_requests=reset_running_requests)
         self.reset_mm_cache()

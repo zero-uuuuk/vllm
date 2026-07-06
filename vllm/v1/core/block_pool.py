@@ -223,10 +223,10 @@ class BlockPool:
         #   Hook #4 on_block_accessed  -> touch()                  (cache hit)
         #   Hook #5 on_block_freed     -> free_blocks()            (ref_cnt 감소)
         #
-        # 이 5개는 block lifecycle 전이를 관찰/attribution하는 진입점으로, PR 3의
-        # owner 부여와 evictable_cached counter의 토대다. victim 선택을 실제로
-        # 가로채는 진입점(select_victim_candidate)은 동작을 바꾸는 PR 4에서
-        # popleft_n 경로에 추가한다. PR 0에서는 LRU를 그대로 두므로 불필요하다.
+        # 이 5개는 block lifecycle 전이를 관찰/attribution하는 진입점이다.
+        # Future PR에서 owner metadata와 occupancy counter를 붙일 때 이 hook들을
+        # 사용한다. victim selection을 실제로 가로채는 policy hook도 future PR에서
+        # popleft_n 경로에 추가한다. PR0에서는 LRU를 그대로 두므로 불필요하다.
         self.metrics_collector = metrics_collector
         # VLLM_EVICTION_LOG keeps evicted cached-prefix blocks pending until the
         # same prefix hash is cached again. At that point the event is written
@@ -332,8 +332,8 @@ class BlockPool:
             self._complete_pending_reuse(bytes(block_hash))
             # ===== QuotaServe Hook #3: on_block_cached (cache 등록 순간) =====
             # 이 insert로 block이 prefix cache에 등록된다(is_cached: F → T).
-            # PR 3의 evictable_cached counter("ref==0 and is_cached")는 이
-            # is_cached 전이에서 재평가되어야 하므로 hook을 건다. request는 이
+            # Future PR에서 occupancy counter("ref==0 and is_cached")를 붙이면
+            # 이 is_cached 전이에서 재평가해야 하므로 hook을 둔다. request는 이
             # 경로에서 항상 가용하다(cache_full_blocks가 request를 받음).
             if self.metrics_collector:
                 self.metrics_collector.on_block_cached(blk, request)
@@ -401,8 +401,8 @@ class BlockPool:
                 block을 evict한다. owner 부여(Hook #1 on_block_allocated)와
                 eviction trigger attribution(Hook #2 on_block_evicted)에
                 사용된다. 호출자(single_type_kv_cache_manager)가 아직 request_id
-                만 가진 경로가 있어 default는 None이며, 실제 request threading은
-                PR 2/3에서 완성된다. None이면 base collector가 인자를 무시하므로
+                만 가진 경로가 있어 default는 None이다. 실제 request threading은
+                future PR에서 완성한다. None이면 base collector가 인자를 무시하므로
                 동작은 기존과 동일하다.
 
         Returns:
@@ -413,8 +413,8 @@ class BlockPool:
 
         # NOTE(QuotaServe): victim 선택은 popleft_n()이 free queue의 head부터
         # (LRU 순) block을 pop하면서 결정된다. PR 0에서는 이 LRU 동작을 바꾸지
-        # 않는다(=baseline parity). 실제 victim 가로채기(over_cap → above_floor
-        # → fallback_lru)는 PR 4에서 동작이 바뀔 때 이 자리에 추가한다(§8). 그
+        # 않는다(=baseline parity). 실제 victim selection override는 future PR에서
+        # static quota policy를 구현할 때 이 자리에 추가한다. 그
         # 전까지 "실제로 뭐가 evict됐나"는 아래 루프의 on_block_evicted(Hook #2)
         # 가 block 단위로 이미 기록하므로 별도 진입점이 필요 없다.
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
@@ -428,9 +428,9 @@ class BlockPool:
                 self._maybe_evict_cached_block(block, trigger_request=request)
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
-                # ===== QuotaServe Hook #1: on_block_allocated (owner 부여) =====
-                # 새로 할당된 block에 owner workload를 부여한다(PR 3). 이 시점의
-                # block은 owner가 비어 있어야(직전 eviction에서 clear) 한다.
+                # ===== QuotaServe Hook #1: on_block_allocated =====
+                # Future PR에서 새로 할당된 block에 owner workload를 부여할 때
+                # 사용할 지점이다. PR0에서는 base collector가 이 인자를 무시한다.
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block, request)
         else:
@@ -462,8 +462,8 @@ class BlockPool:
         """
         # ===== QuotaServe Hook #2: on_block_evicted (trigger attribution) =====
         # Clean up metrics tracking first to prevent leaks.
-        # block(victim) + trigger_request(가해 workload)를 함께 넘긴다. PR 3
-        # 이후 collector는 여기서 eviction을 로깅하고 block owner를 clear한다.
+        # block(victim) + trigger_request(가해 workload)를 함께 넘긴다. Future PR의
+        # collector는 여기서 trigger attribution과 owner cleanup을 처리할 수 있다.
         if self.metrics_collector:
             self.metrics_collector.on_block_evicted(block, trigger_request)
 
@@ -572,9 +572,9 @@ class BlockPool:
 
         Args:
             blocks: A list of blocks to touch.
-            request: (QuotaServe PR 0) cache hit을 일으킨 요청(hit-side
-                workload). owner(block.workload_id)는 절대 바꾸지 않으며(§7.1),
-                PR 3에서 필요 시 hit-side workload만 별도로 기록한다. 호출자
+            request: (QuotaServe PR0) cache hit을 일으킨 요청(hit-side
+                workload). owner tag는 hit으로 바꾸지 않는다. Future PR에서
+                필요 시 hit-side workload만 별도로 기록한다. 호출자
                 (single_type_kv_cache_manager.add_new_computed_blocks)가 아직
                 request_id만 가진 경로라 default는 None이다.
         """
@@ -582,10 +582,9 @@ class BlockPool:
             # ref_cnt=0 means this block is in the free list (i.e. eviction
             # candidate), so remove it.
             #
-            # NOTE(QuotaServe PR 3): ref_cnt 0 → 1 전이는 block이 evictable
-            # 후보에서 빠지는 순간이다. evictable_cached counter는 이 transition
-            # 에서 -1 되어야 하지만, 그 처리는 on_block_accessed를 override하는
-            # QuotaServe collector에서 담당한다(여기서는 ref_cnt만 조정).
+            # NOTE(QuotaServe future PR): ref_cnt 0 → 1 전이는 block이 evictable
+            # 후보에서 빠지는 순간이다. Occupancy counter를 추가하면 이 transition
+            # 에서 -1 해야 하지만, PR0에서는 ref_cnt만 조정한다.
             if block.ref_cnt == 0 and not block.is_null:
                 self.free_block_queue.remove(block)
             block.ref_cnt += 1
@@ -615,8 +614,8 @@ class BlockPool:
         for block in blocks_list:
             # ===== QuotaServe Hook #5: on_block_freed (ref_cnt → 0 transition) =====
             # ref_cnt 감소 전/후 값을 함께 넘긴다. new_ref_cnt == 0 이고 block이
-            # cached면 그 block은 free queue로 들어가 evictable_cached 후보가
-            # 된다. PR 3의 counter는 정확히 이 transition에서 +1 한다(§7.3).
+            # cached면 그 block은 free queue로 들어가 evictable 후보가 된다.
+            # Future PR에서 occupancy counter를 추가하면 이 transition에서 +1 한다.
             prev_ref_cnt = block.ref_cnt
             block.ref_cnt -= 1
             if self.metrics_collector:
@@ -670,11 +669,6 @@ class BlockPool:
         # Remove all hashes from all blocks.
         for block in self.blocks:
             block.reset_hash()
-            block.workload_tag = None
-            block.is_counted_as_evictable_cached = False
-            block.cached_request_id = None
-            block.block_index = -1
-            block.last_access_time = 0.0
 
         if self.metrics_collector:
             self.metrics_collector.reset()

@@ -13,8 +13,8 @@ from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 # coordinator를 거쳐 BlockPool까지 전달하는 **순수 배선 경로**다. 실제 hook
 # fire는 모두 block_pool.py에서 일어난다(§4.1 NOTE). 이 파일에서 직접 hook을
 # 호출하지는 않지만, allocate_slots/cache_blocks/free는 request 객체를 가진
-# 상위 진입점이므로 PR 2/3에서 request를 block_pool hook까지 내려보내는 출발점이
-# 된다.
+# 상위 진입점이므로 future PR에서 request를 block_pool hook까지 내려보내는
+# 출발점이 된다.
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -414,12 +414,12 @@ class KVCacheManager:
                 num_external_computed_tokens=num_external_computed_tokens,
             )
 
-        # QuotaServe PR 2/3 threading point:
+        # QuotaServe future PR threading point:
         # 여기서 request는 가용하지만, 현재 coordinator/single_type_manager는
         # request_id만 아래로 전달한다. 그래서 BlockPool.get_new_blocks()의
-        # request 인자는 PR 0 단계에서 None으로 들어온다(=baseline 동작). PR 2/3
+        # request 인자는 PR0 단계에서 None으로 들어온다(=baseline 동작). Future PR
         # 에서 이 호출 사슬(allocate_new_blocks → get_new_blocks)에 request 또는
-        # request.workload_id를 함께 내려보내 Hook #1(on_block_allocated, owner
+        # workload tag를 함께 내려보내 Hook #1(on_block_allocated, owner
         # 부여)과 Hook #2(on_block_evicted, trigger attribution)가 실제 workload를
         # 받도록 확장한다.
         new_blocks = self.coordinator.allocate_new_blocks(

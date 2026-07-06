@@ -120,6 +120,7 @@ class KVCacheCoordinator(ABC):
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
+        request: Request | None = None,
     ) -> None:
         """
         Add the new computed blocks to the request. Optionally allocate new
@@ -138,6 +139,7 @@ class KVCacheCoordinator(ABC):
                 new_computed_blocks[i],
                 num_local_computed_tokens,
                 num_external_computed_tokens,
+                request=request,
             )
 
     def allocate_new_blocks(
@@ -146,6 +148,7 @@ class KVCacheCoordinator(ABC):
         num_tokens: int,
         num_tokens_main_model: int,
         num_encoder_tokens: int = 0,
+        request: Request | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Allocate new blocks for the request to give it at least `num_tokens`
@@ -171,6 +174,7 @@ class KVCacheCoordinator(ABC):
                 if isinstance(manager, CrossAttentionManager)
                 else num_tokens,
                 num_tokens_main_model,
+                request=request,
             )
             for manager in self.single_type_managers
         )

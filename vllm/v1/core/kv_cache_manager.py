@@ -412,21 +412,18 @@ class KVCacheManager:
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
+                request=request,
             )
 
-        # QuotaServe future PR threading point:
-        # 여기서 request는 가용하지만, 현재 coordinator/single_type_manager는
-        # request_id만 아래로 전달한다. 그래서 BlockPool.get_new_blocks()의
-        # request 인자는 PR0 단계에서 None으로 들어온다(=baseline 동작). Future PR
-        # 에서 이 호출 사슬(allocate_new_blocks → get_new_blocks)에 request 또는
-        # workload tag를 함께 내려보내 Hook #1(on_block_allocated, owner
-        # 부여)과 Hook #2(on_block_evicted, trigger attribution)가 실제 workload를
-        # 받도록 확장한다.
+        # QuotaServe PR0: keep the actual Request on the allocation path so
+        # BlockPool can attribute baseline LRU evictions to the trigger workload.
+        # This only enriches logging; victim selection remains the original LRU.
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id,
             num_tokens_need_slot,
             num_tokens_main_model,
             num_encoder_tokens,
+            request=request,
         )
 
         # P/D: delay caching blocks if we have to recv from

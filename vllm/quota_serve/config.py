@@ -10,10 +10,11 @@ the scheduler/collector.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Final, Literal, Mapping, cast
+from typing import Any, Final, Literal, cast
 
 QuotaServeMode = Literal["off", "static", "dynamic"]
 
@@ -35,7 +36,14 @@ class WorkloadQuota:
     quota_ratio: float
 
     def __post_init__(self) -> None:
-        quota_ratio = _coerce_float("quota_ratio", self.quota_ratio)
+        quota_ratio = float(
+            _expect_type(
+                "quota_ratio",
+                self.quota_ratio,
+                (float, int),
+                reject_bool=True,
+            )
+        )
         if quota_ratio < 0.0 or quota_ratio > 1.0:
             raise ValueError(
                 "quota_ratio must be between 0 and 1 inclusive, "
@@ -61,14 +69,23 @@ class QuotaServeConfig:
     log_path: str | None = None
 
     def __post_init__(self) -> None:
-        enabled = _coerce_bool("enabled", self.enabled)
+        enabled = _expect_type("enabled", self.enabled, bool)
         mode = _coerce_mode(self.mode)
-        tick_sec = _coerce_positive_int("tick_sec", self.tick_sec)
-        shadow_ttl_sec = _coerce_positive_int(
-            "shadow_ttl_sec", self.shadow_ttl_sec
+        tick_sec = _expect_type("tick_sec", self.tick_sec, int, reject_bool=True)
+        if tick_sec <= 0:
+            raise ValueError(f"tick_sec must be positive, got {tick_sec!r}")
+        shadow_ttl_sec = _expect_type(
+            "shadow_ttl_sec",
+            self.shadow_ttl_sec,
+            int,
+            reject_bool=True,
         )
+        if shadow_ttl_sec <= 0:
+            raise ValueError(
+                f"shadow_ttl_sec must be positive, got {shadow_ttl_sec!r}"
+            )
         workloads = _coerce_workloads(self.workloads)
-        log_path = _coerce_optional_str("log_path", self.log_path)
+        log_path = _expect_type("log_path", self.log_path, str, optional=True)
 
         object.__setattr__(self, "enabled", enabled)
         object.__setattr__(self, "mode", mode)
@@ -99,19 +116,10 @@ class QuotaServeConfig:
             workload, WorkloadQuota(_UNKNOWN_WORKLOAD_QUOTA_RATIO)
         )
 
-    def validate(self) -> "QuotaServeConfig":
-        """Return self after dataclass post-init validation.
-
-        Kept as an explicit API because the PR1 roadmap calls out a validate()
-        entry point.
-        """
-        return self
-
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "QuotaServeConfig":
         """Build a config object from the `quota_serve` YAML section."""
-        if not isinstance(data, Mapping):
-            raise TypeError("QuotaServe config must be a mapping")
+        _expect_type("QuotaServe config", data, Mapping)
 
         allowed_keys = {
             "enabled",
@@ -167,21 +175,12 @@ def _load_config_section(path: str | os.PathLike[str]) -> Mapping[str, Any]:
     with config_path.open("r", encoding="utf-8") as config_file:
         raw_config = yaml.safe_load(config_file) or {}
 
-    if not isinstance(raw_config, Mapping):
-        raise TypeError(
-            "QuotaServe config file must contain a YAML mapping, "
-            f"got {type(raw_config).__name__}"
-        )
+    _expect_type("QuotaServe config file", raw_config, Mapping)
 
     section = raw_config.get("quota_serve", raw_config)
     if section is None:
         return {}
-    if not isinstance(section, Mapping):
-        raise TypeError(
-            "quota_serve section must be a mapping, "
-            f"got {type(section).__name__}"
-        )
-    return section
+    return _expect_type("quota_serve section", section, Mapping)
 
 
 def _apply_env_overrides(config: QuotaServeConfig) -> QuotaServeConfig:
@@ -206,23 +205,19 @@ def _apply_env_overrides(config: QuotaServeConfig) -> QuotaServeConfig:
 def _coerce_workloads(
     workloads: Mapping[str, WorkloadQuota | Mapping[str, Any]],
 ) -> Mapping[str, WorkloadQuota]:
-    if not isinstance(workloads, Mapping):
-        raise TypeError("workloads must be a mapping")
+    workloads = _expect_type("workloads", workloads, Mapping)
 
     converted: dict[str, WorkloadQuota] = {}
     for workload, quota in workloads.items():
-        if not isinstance(workload, str) or not workload:
+        workload = _expect_type("workload name", workload, str)
+        if not workload:
             raise ValueError(f"workload name must be a non-empty string: {workload!r}")
 
         if isinstance(quota, WorkloadQuota):
             converted[workload] = quota
             continue
 
-        if not isinstance(quota, Mapping):
-            raise TypeError(
-                f"workloads.{workload} must be a mapping, "
-                f"got {type(quota).__name__}"
-            )
+        quota = _expect_type(f"workloads.{workload}", quota, Mapping)
         if "quota_ratio" not in quota:
             raise ValueError(f"workloads.{workload}.quota_ratio is required")
         converted[workload] = WorkloadQuota(quota["quota_ratio"])
@@ -231,8 +226,7 @@ def _coerce_workloads(
 
 
 def _coerce_mode(mode: Any) -> QuotaServeMode:
-    if not isinstance(mode, str):
-        raise TypeError(f"mode must be a string, got {type(mode).__name__}")
+    mode = _expect_type("mode", mode, str)
     if mode not in _ALLOWED_MODES:
         raise ValueError(
             "mode must be one of "
@@ -242,29 +236,27 @@ def _coerce_mode(mode: Any) -> QuotaServeMode:
     return cast(QuotaServeMode, mode)
 
 
-def _coerce_bool(name: str, value: Any) -> bool:
-    if not isinstance(value, bool):
-        raise TypeError(f"{name} must be a bool, got {type(value).__name__}")
-    return value
+def _expect_type(
+    name: str,
+    value: Any,
+    expected_type: type[Any] | tuple[type[Any], ...],
+    *,
+    optional: bool = False,
+    reject_bool: bool = False,
+) -> Any:
+    if isinstance(expected_type, tuple):
+        expected_name = " or ".join(t.__name__ for t in expected_type)
+    else:
+        expected_name = expected_type.__name__
 
-
-def _coerce_positive_int(name: str, value: Any) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise TypeError(f"{name} must be an int, got {type(value).__name__}")
-    if value <= 0:
-        raise ValueError(f"{name} must be positive, got {value!r}")
-    return value
-
-
-def _coerce_float(name: str, value: Any) -> float:
-    if isinstance(value, bool) or not isinstance(value, (float, int)):
-        raise TypeError(f"{name} must be a number, got {type(value).__name__}")
-    return float(value)
-
-
-def _coerce_optional_str(name: str, value: Any) -> str | None:
-    if value is None:
+    if value is None and optional:
         return None
-    if not isinstance(value, str):
-        raise TypeError(f"{name} must be a string or None, got {type(value).__name__}")
+    if reject_bool and isinstance(value, bool):
+        raise TypeError(f"{name} must be {expected_name}, got bool")
+    if not isinstance(value, expected_type):
+        if optional:
+            expected_name = f"{expected_name} or None"
+        raise TypeError(
+            f"{name} must be {expected_name}, got {type(value).__name__}"
+        )
     return value

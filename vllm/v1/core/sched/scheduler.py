@@ -32,6 +32,8 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.quota_serve.collector import QuotaServeCollector
+from vllm.quota_serve.config import load_quota_serve_config
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -84,8 +86,16 @@ class Scheduler(SchedulerInterface):
         self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
         self.observability_config = vllm_config.observability_config
+        self.quota_serve_config = load_quota_serve_config()
         self.kv_metrics_collector: KVCacheMetricsCollector | None = None
-        if self.observability_config.kv_cache_metrics:
+        if self.quota_serve_config.is_active:
+            self.kv_metrics_collector = QuotaServeCollector(
+                self.observability_config.kv_cache_metrics_sample,
+                collect_residency_metrics=(
+                    self.observability_config.kv_cache_metrics
+                ),
+            )
+        elif self.observability_config.kv_cache_metrics:
             self.kv_metrics_collector = KVCacheMetricsCollector(
                 self.observability_config.kv_cache_metrics_sample,
             )

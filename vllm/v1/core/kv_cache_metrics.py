@@ -10,9 +10,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     # NOTE(QuotaServe PR 0): hook 시그니처가 Request를 참조하지만, 이 모듈은
     # hot-path에서 import되므로 런타임 순환 import를 피하기 위해 TYPE_CHECKING
-    # 블록 안에서만 타입을 들여온다. 실제 attribution(owner workload 부여 등)은
-    # future PR에서 QuotaServe 전용 collector 서브클래스가 이 인자들을 사용하게
-    # 된다.
+    # 블록 안에서만 타입을 들여온다. PR3의 QuotaServeCollector가 이 인자들로
+    # owner attribution과 occupancy 상태 전이를 처리한다.
     from vllm.v1.core.kv_cache_utils import KVCacheBlock
     from vllm.v1.request import Request
 
@@ -63,7 +62,7 @@ class KVCacheMetricsCollector:
 
     1) **시그니처 확장 hook** — 기존 observation hook에 trigger/owner request를
        optional 인자로 추가한다. base는 인자를 무시하므로 동작이 바뀌지 않는다.
-       Future PR의 QuotaServe collector가 이 인자로 block owner tag를 부여할 수 있다.
+       PR3의 QuotaServeCollector가 이 인자로 block owner tag를 부여한다.
          - on_block_allocated(block, request)
          - on_block_evicted(block, trigger_request)
          - on_block_accessed(block, request)
@@ -79,7 +78,7 @@ class KVCacheMetricsCollector:
     포함하지 않는다. "실제로 무엇이 evict됐는지"는 on_block_evicted가 block
     단위로 이미 기록하고, "QuotaServe라면 무엇을 골랐을지"는 owner workload
     와 static quota policy가 갖춰져야 의미가 생기기 때문이다. 따라서 그
-    진입점은 실제로 동작을 바꾸는 future PR에서 popleft_n 경로에 추가한다.
+    진입점은 실제로 동작을 바꾸는 PR4에서 popleft_n 경로에 추가한다.
     """
 
     def __init__(self, sample_rate: float = 0.01):
@@ -108,8 +107,8 @@ class KVCacheMetricsCollector:
 
         호출 지점: ``BlockPool.get_new_blocks()`` (block_pool.py).
         ``request``는 이 block을 끌어온 trigger 요청이다. base collector는
-        residency 샘플링만 하므로 무시한다. Future PR의 QuotaServe collector는
-        request의 workload tag를 block의 owner로 부여할 수 있다.
+        residency 샘플링만 하므로 무시한다. PR3의 QuotaServeCollector는
+        request의 workload tag를 block의 owner로 부여한다.
         """
         if self.should_sample_block():
             self.block_metrics[block.block_id] = BlockMetricsState()
@@ -139,8 +138,8 @@ class KVCacheMetricsCollector:
 
         호출 지점: ``BlockPool._maybe_evict_cached_block()`` (block_pool.py).
         ``trigger_request``는 이 eviction을 유발한(= 새 block이 필요했던) 요청
-        이다. Future PR의 QuotaServe collector는 여기서 trigger workload를
-        eviction 로그에 기록하고 block owner cleanup을 처리할 수 있다.
+        이다. PR3의 QuotaServeCollector는 여기서 victim owner의 occupancy를
+        감소시킨다. Trigger workload의 quota log 활용은 이후 PR에서 연결한다.
         """
         metrics = self.block_metrics.pop(block.block_id, None)
         if not metrics:
@@ -170,8 +169,8 @@ class KVCacheMetricsCollector:
         """Block이 prefix cache에 **등록**되는 순간(is_cached: False → True).
 
         호출 지점: ``BlockPool.cache_full_blocks()`` insert 직후 (block_pool.py).
-        Future PR에서 occupancy counter("ref==0 and is_cached")를 추가하면,
-        cache 등록 순간에 counter 재평가가 필요하다.
+        PR3의 QuotaServeCollector는 cache 등록 순간에 occupancy 포함 여부를
+        재평가한다.
         base는 계측 대상이 아니므로 no-op.
         """
         return None
@@ -186,9 +185,9 @@ class KVCacheMetricsCollector:
 
         호출 지점: ``BlockPool.free_blocks()`` ``ref_cnt -= 1`` 직후
         (block_pool.py). ref_cnt가 0이 되면 그 block은 free queue로 들어가
-        evictable 후보가 된다. Future PR에서 occupancy counter를 추가하면
-        이 transition(``new_ref_cnt == 0 and is_cached``)에서 +1 해야 하므로
-        prev/new ref_cnt를 함께 넘긴다. base는 no-op.
+        evictable 후보가 된다. PR3의 QuotaServeCollector는 이 transition
+        (``new_ref_cnt == 0 and is_cached``)에서 occupancy에 추가한다.
+        prev/new ref_cnt를 함께 넘기지만 base는 no-op이다.
         """
         return None
 

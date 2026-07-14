@@ -131,6 +131,9 @@ class KVCacheBlock:
     # accept dynamic attrs. They are set when the block becomes a cached prefix
     # block and used if it is later evicted.
     workload_tag: str = ""
+    # Whether this physical block is currently included in workload occupancy.
+    # The flag makes occupancy updates idempotent across lifecycle hooks.
+    is_counted_as_evictable_cached: bool = False
     cached_request_id: str = ""
     block_index: int = -1
     last_access_time: float = 0.0
@@ -150,6 +153,7 @@ class KVCacheBlock:
         """Reset the block hash and QuotaServe PR0 attribution metadata."""
         self._block_hash = None
         self.workload_tag = ""
+        self.is_counted_as_evictable_cached = False
         self.cached_request_id = ""
         self.block_index = -1
         self.last_access_time = 0.0

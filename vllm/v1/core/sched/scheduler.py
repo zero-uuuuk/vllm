@@ -87,6 +87,13 @@ class Scheduler(SchedulerInterface):
         self.log_stats = log_stats
         self.observability_config = vllm_config.observability_config
         self.quota_serve_config = load_quota_serve_config()
+        logger.info(
+            "QuotaServe config: enabled=%s mode=%s active=%s workloads=%s",
+            self.quota_serve_config.enabled,
+            self.quota_serve_config.mode,
+            self.quota_serve_config.is_active,
+            sorted(self.quota_serve_config.workloads),
+        )
         self.kv_metrics_collector: KVCacheMetricsCollector | None = None
         if self.quota_serve_config.is_active:
             self.kv_metrics_collector = QuotaServeCollector(

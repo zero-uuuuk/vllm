@@ -17,6 +17,7 @@ from vllm.distributed.kv_events import (
 )
 from vllm.logger import init_logger
 from vllm.quota_serve.workload import infer_workload
+from vllm.quota_serve.victim_selector import VictimSelection
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -219,6 +220,10 @@ class BlockPool:
         # Optional PR4 policy entry point. When unset, allocation keeps the
         # existing global-LRU popleft_n() path unchanged.
         self.victim_selector = victim_selector
+        # PR4 selection metadata is kept per physical block because one
+        # allocation may select multiple victims. The metadata is consumed
+        # when that block's cache eviction is confirmed.
+        self._pending_victim_selections: dict[int, VictimSelection] = {}
 
         # QuotaServe hook map (PR 0, QUOTASERVE_IMPLEMENTATION_PLAN.md §4.1)
         # ------------------------------------------------------------------
@@ -464,6 +469,13 @@ class BlockPool:
         selected: list[KVCacheBlock] = []
         for _ in range(num_blocks):
             block = self.victim_selector(self.free_block_queue, request)
+            selection = getattr(self.victim_selector, "last_selection", None)
+            if isinstance(selection, VictimSelection):
+                if selection.block is not block:
+                    raise RuntimeError(
+                        "victim selector metadata does not match selected block"
+                    )
+                self._pending_victim_selections[block.block_id] = selection
             self.free_block_queue.remove(block)
             selected.append(block)
         return selected
@@ -487,6 +499,7 @@ class BlockPool:
         Returns:
             True if the block is evicted, False otherwise.
         """
+        selection = self._pending_victim_selections.pop(block.block_id, None)
         block_hash = block.block_hash
         if block_hash is None:
             # The block doesn't have hash, eviction is not needed
@@ -504,7 +517,12 @@ class BlockPool:
         if self.metrics_collector:
             self.metrics_collector.on_block_evicted(block, trigger_request)
 
-        self._remember_eviction_event(block, block_hash, trigger_request)
+        self._remember_eviction_event(
+            block,
+            block_hash,
+            trigger_request,
+            selection=selection,
+        )
         block.reset_hash()
 
         if self.enable_kv_cache_events:
@@ -541,13 +559,42 @@ class BlockPool:
         block: KVCacheBlock,
         block_hash: BlockHashWithGroupId,
         trigger_request: Request | None,
+        selection: VictimSelection | None = None,
     ) -> None:
         if _eviction_log_file is None:
             return
         raw_hash_bytes = bytes(get_block_hash(block_hash))
+        evictor_workload = _request_workload(trigger_request)
+        victim_workload = block.workload_tag or None
+        is_cross_workload = (
+            None
+            if evictor_workload in (None, "unknown")
+            or victim_workload in (None, "unknown")
+            else evictor_workload != victim_workload
+        )
+        if selection is not None:
+            selection_reason = selection.reason
+            victim_occupancy = selection.victim_occupancy
+            victim_quota = selection.victim_quota
+            occupancy_snapshot = selection.occupancy_snapshot
+            scan_steps = selection.scan_steps
+        elif self.victim_selector is None:
+            selection_reason = "baseline_lru_off_mode"
+            victim_occupancy = None
+            victim_quota = None
+            occupancy_snapshot = {}
+            scan_steps = None
+        else:
+            # This path is reserved for eviction callers that bypass the
+            # selector, such as external block eviction.
+            selection_reason = "external_eviction"
+            victim_occupancy = None
+            victim_quota = None
+            occupancy_snapshot = {}
+            scan_steps = None
         event: dict[str, Any] = {
             "evicted_workload": block.workload_tag,
-            "trigger_workload": _request_workload(trigger_request),
+            "trigger_workload": evictor_workload,
             "evicted_request_id": block.cached_request_id,
             "trigger_request_id": _request_id(trigger_request),
             "evicted_prefix_hash": raw_hash_bytes.hex(),
@@ -555,6 +602,12 @@ class BlockPool:
             "evicted_block_size": self.hash_block_size,
             "eviction_time": time.time(),
             "last_access_time": block.last_access_time,
+            "is_cross_workload": is_cross_workload,
+            "selection_reason": selection_reason,
+            "victim_occupancy": victim_occupancy,
+            "victim_quota": victim_quota,
+            "occupancy_snapshot": occupancy_snapshot,
+            "scan_steps": scan_steps,
             "reused_later": False,
             "time_until_next_reuse": None,
         }

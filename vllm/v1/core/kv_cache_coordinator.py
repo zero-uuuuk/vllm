@@ -335,6 +335,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             pcp_world_size=pcp_world_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
+            victim_selector=victim_selector,
         )
         self.kv_cache_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
         self.block_size = self.kv_cache_spec.block_size

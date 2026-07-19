@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from math import lcm
 
-from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.block_pool import BlockPool, VictimSelector
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -41,6 +41,7 @@ class KVCacheCoordinator(ABC):
         pcp_world_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        victim_selector: VictimSelector | None = None,
     ):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
@@ -52,6 +53,7 @@ class KVCacheCoordinator(ABC):
             hash_block_size,
             enable_kv_cache_events,
             metrics_collector,
+            victim_selector,
         )
 
         # Needs special handling for find_longest_cache_hit if eagle is enabled
@@ -321,6 +323,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         pcp_world_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        victim_selector: VictimSelector | None = None,
     ):
         super().__init__(
             kv_cache_config,
@@ -558,6 +561,7 @@ def get_kv_cache_coordinator(
     pcp_world_size: int,
     hash_block_size: int,
     metrics_collector: KVCacheMetricsCollector | None = None,
+    victim_selector: VictimSelector | None = None,
 ) -> KVCacheCoordinator:
     if not enable_caching:
         return KVCacheCoordinatorNoPrefixCache(
@@ -581,6 +585,7 @@ def get_kv_cache_coordinator(
             pcp_world_size=pcp_world_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
+            victim_selector=victim_selector,
         )
     return HybridKVCacheCoordinator(
         kv_cache_config,

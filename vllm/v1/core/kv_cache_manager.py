@@ -8,6 +8,7 @@ from typing import Literal, overload
 
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
+from vllm.v1.core.block_pool import VictimSelector
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 # QuotaServe PR 0: KVCacheManager는 metrics_collector(= hook 정의 지점)를 받아
 # coordinator를 거쳐 BlockPool까지 전달하는 **순수 배선 경로**다. 실제 hook
@@ -126,6 +127,7 @@ class KVCacheManager:
         # 가 주입되며, mode=off에서는 base collector거나 None이라 parity가 깨지지
         # 않는다(§5.3).
         metrics_collector: KVCacheMetricsCollector | None = None,
+        victim_selector: VictimSelector | None = None,
     ) -> None:
         self.max_model_len = max_model_len
 
@@ -151,6 +153,7 @@ class KVCacheManager:
             # QuotaServe PR 0: collector를 coordinator → BlockPool로 전달.
             # 이 한 줄이 hook map 전체를 BlockPool에 연결한다.
             metrics_collector=self.metrics_collector,
+            victim_selector=victim_selector,
         )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool

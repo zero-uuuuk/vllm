@@ -34,6 +34,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.quota_serve.collector import QuotaServeCollector
 from vllm.quota_serve.config import load_quota_serve_config
+from vllm.quota_serve.victim_selector import QuotaAwareVictimSelector
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -105,6 +106,20 @@ class Scheduler(SchedulerInterface):
         elif self.observability_config.kv_cache_metrics:
             self.kv_metrics_collector = KVCacheMetricsCollector(
                 self.observability_config.kv_cache_metrics_sample,
+            )
+        self.victim_selector: QuotaAwareVictimSelector | None = None
+        if (
+            self.quota_serve_config.mode == "static"
+            and self.cache_config.enable_prefix_caching
+        ):
+            # PR4 implements static selection only. Dynamic control owns a
+            # separate future selector/controller and must not use static
+            # quotas accidentally.
+            assert isinstance(self.kv_metrics_collector, QuotaServeCollector)
+            self.victim_selector = QuotaAwareVictimSelector(
+                self.quota_serve_config,
+                self.kv_metrics_collector.occupancy_snapshot,
+                kv_cache_config.num_blocks,
             )
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
@@ -250,6 +265,7 @@ class Scheduler(SchedulerInterface):
             pcp_world_size=self.pcp_world_size,
             hash_block_size=self.block_size,
             metrics_collector=self.kv_metrics_collector,
+            victim_selector=self.victim_selector,
         )
         # Bind GPU block pool to the KV connector. This must happen after
         # kv_cache_manager is constructed so block_pool is available.

@@ -4,7 +4,7 @@ import atexit
 import json
 import os
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +37,11 @@ logger = init_logger(__name__)
 
 _MAX_PENDING_EVICTIONS = 200_000
 _eviction_log_path: str | None = os.environ.get("VLLM_EVICTION_LOG")
+
+VictimSelector = Callable[
+    [FreeKVCacheBlockQueue, Request | None],
+    KVCacheBlock,
+]
 
 
 def _open_eviction_log(path: str | None):
@@ -185,6 +190,7 @@ class BlockPool:
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        victim_selector: VictimSelector | None = None,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
@@ -210,6 +216,9 @@ class BlockPool:
 
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
+        # Optional PR4 policy entry point. When unset, allocation keeps the
+        # existing global-LRU popleft_n() path unchanged.
+        self.victim_selector = victim_selector
 
         # QuotaServe hook map (PR 0, QUOTASERVE_IMPLEMENTATION_PLAN.md §4.1)
         # ------------------------------------------------------------------
@@ -409,13 +418,13 @@ class BlockPool:
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        # NOTE(QuotaServe): victim 선택은 popleft_n()이 free queue의 head부터
-        # (LRU 순) block을 pop하면서 결정된다. PR 0에서는 이 LRU 동작을 바꾸지
-        # 않는다(=baseline parity). 실제 victim selection override는 PR4에서
-        # static quota policy를 구현할 때 이 자리에 추가한다. 그
-        # 전까지 "실제로 뭐가 evict됐나"는 아래 루프의 on_block_evicted(Hook #2)
-        # 가 block 단위로 이미 기록하므로 별도 진입점이 필요 없다.
-        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        # PR4 policy selects one block at a time so each selected victim is
+        # removed from the queue before the next selection. Until a selector
+        # is wired in, preserve the existing global-LRU batch path exactly.
+        if self.enable_caching and self.victim_selector is not None:
+            ret = self._select_blocks_with_policy(num_blocks, request)
+        else:
+            ret = self.free_block_queue.popleft_n(num_blocks)
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
@@ -438,6 +447,26 @@ class BlockPool:
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block, request)
         return ret
+
+    def _select_blocks_with_policy(
+        self,
+        num_blocks: int,
+        request: Request | None,
+    ) -> list[KVCacheBlock]:
+        """Select and remove allocation blocks one at a time.
+
+        The selector must return a block that is still in ``free_block_queue``.
+        Removing it here keeps queue mutation in BlockPool and lets the next
+        selection observe the queue after the previous block was removed.
+        The concrete QuotaServe policy is added in a later PR4 step.
+        """
+        assert self.victim_selector is not None
+        selected: list[KVCacheBlock] = []
+        for _ in range(num_blocks):
+            block = self.victim_selector(self.free_block_queue, request)
+            self.free_block_queue.remove(block)
+            selected.append(block)
+        return selected
 
     def _maybe_evict_cached_block(
         self,

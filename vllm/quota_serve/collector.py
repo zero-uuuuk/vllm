@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""QuotaServe PR3 block ownership and occupancy accounting."""
+"""QuotaServe PR3 occupancy accounting and PR5 signal contract."""
 
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from threading import Lock
 from typing import TYPE_CHECKING
@@ -23,6 +23,46 @@ class WorkloadState:
     """Runtime counters for one workload."""
 
     evictable_cached: int = 0
+
+
+def is_useful_eviction(
+    event: Mapping[str, object],
+    requester_workload: str,
+    *,
+    is_cache_miss: bool,
+    now: float,
+    shadow_ttl_sec: float,
+) -> bool:
+    """Return whether a pending eviction satisfies the PR5-1 contract.
+
+    The caller invokes this only after a request actually misses the cache
+    and recomputes the evicted prefix.  The event is counted only when it is
+    cross-workload, belongs to the requesting workload, is within the shadow
+    TTL, and has not already been counted.
+    """
+    evictor = event.get("trigger_workload")
+    victim = event.get("evicted_workload")
+    eviction_time = event.get("eviction_time")
+
+    if not is_cache_miss:
+        return False
+    if not isinstance(evictor, str) or not isinstance(victim, str):
+        return False
+    if (
+        not evictor
+        or evictor == victim
+        or event.get("is_cross_workload") is not True
+    ):
+        return False
+    if requester_workload != victim:
+        return False
+    if event.get("useful_counted", False) is True:
+        return False
+    if type(eviction_time) not in (int, float):
+        return False
+
+    age = now - eviction_time
+    return 0 <= age <= shadow_ttl_sec
 
 
 class QuotaServeCollector(KVCacheMetricsCollector):

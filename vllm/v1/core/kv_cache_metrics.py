@@ -84,6 +84,8 @@ class KVCacheMetricsCollector:
     진입점은 실제로 동작을 바꾸는 PR4에서 popleft_n 경로에 추가한다.
     """
 
+    collects_eviction_signals = False
+
     def __init__(self, sample_rate: float = 0.01):
         assert 0 < sample_rate <= 1.0, (
             f"sample_rate must be in (0, 1.0], got {sample_rate}"
@@ -213,6 +215,21 @@ class KVCacheMetricsCollector:
         """Notify the collector when an eviction enters the shadow window."""
         del event
         return None
+
+    def maybe_log_signal(
+        self,
+        now: float | None = None,
+        *,
+        force: bool = False,
+    ) -> int:
+        """Optionally write a QuotaServe signal snapshot."""
+        del now, force
+        return 0
+
+    def flush_signal_log(self, *, force: bool = True) -> int:
+        """Optionally flush a QuotaServe signal snapshot."""
+        del force
+        return 0
 
     def reset(self) -> None:
         """Clear all state on cache reset."""

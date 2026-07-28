@@ -104,6 +104,8 @@ class Scheduler(SchedulerInterface):
                 ),
                 shadow_ttl_sec=self.quota_serve_config.shadow_ttl_sec,
                 window_size=self.quota_serve_config.window_size,
+                tick_sec=self.quota_serve_config.tick_sec,
+                log_path=self.quota_serve_config.log_path,
             )
         elif self.observability_config.kv_cache_metrics:
             self.kv_metrics_collector = KVCacheMetricsCollector(

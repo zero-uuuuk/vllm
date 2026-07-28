@@ -451,6 +451,8 @@ class BlockPool:
                 block.ref_cnt += 1
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block, request)
+        if self.metrics_collector:
+            self.metrics_collector.maybe_log_signal()
         return ret
 
     def _select_blocks_with_policy(
@@ -567,7 +569,10 @@ class BlockPool:
         trigger_request: Request | None,
         selection: VictimSelection | None = None,
     ) -> None:
-        if _eviction_log_file is None and self.metrics_collector is None:
+        if _eviction_log_file is None and not (
+            self.metrics_collector is not None
+            and self.metrics_collector.collects_eviction_signals
+        ):
             return
         raw_hash_bytes = bytes(get_block_hash(block_hash))
         evictor_workload = _request_workload(trigger_request)
@@ -633,6 +638,8 @@ class BlockPool:
         if self._pending_evictions_count == 0:
             if _eviction_log_file is not None:
                 _eviction_log_file.flush()
+            if self.metrics_collector:
+                self.metrics_collector.flush_signal_log()
             return 0
 
         num_flushed = self._pending_evictions_count
@@ -643,6 +650,8 @@ class BlockPool:
         self._pending_evictions_count = 0
         if _eviction_log_file is not None:
             _eviction_log_file.flush()
+        if self.metrics_collector:
+            self.metrics_collector.flush_signal_log()
         logger.info("Flushed %d pending eviction events.", num_flushed)
         return num_flushed
 
@@ -712,6 +721,8 @@ class BlockPool:
         self.free_block_queue.append_n(
             [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
         )
+        if self.metrics_collector:
+            self.metrics_collector.maybe_log_signal()
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.

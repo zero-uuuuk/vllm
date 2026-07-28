@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING
 
@@ -87,6 +89,8 @@ class QuotaServeCollector(KVCacheMetricsCollector):
     transition, so a concurrent hook cannot apply the same update twice.
     """
 
+    collects_eviction_signals = True
+
     def __init__(
         self,
         sample_rate: float = 0.01,
@@ -94,15 +98,28 @@ class QuotaServeCollector(KVCacheMetricsCollector):
         collect_residency_metrics: bool = False,
         shadow_ttl_sec: float = 120,
         window_size: int = 1000,
+        tick_sec: float = 30,
+        log_path: str | None = None,
     ) -> None:
         super().__init__(sample_rate)
         if shadow_ttl_sec <= 0:
             raise ValueError("shadow_ttl_sec must be positive")
         if window_size <= 0:
             raise ValueError("window_size must be positive")
+        if tick_sec <= 0:
+            raise ValueError("tick_sec must be positive")
         self._collect_residency_metrics = collect_residency_metrics
         self._shadow_ttl_sec = float(shadow_ttl_sec)
         self._window_size = window_size
+        self._tick_sec = float(tick_sec)
+        self._signal_log_file = None
+        self._last_signal_log_time: float | None = None
+        if log_path:
+            signal_log_path = Path(log_path).expanduser()
+            signal_log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._signal_log_file = signal_log_path.open(
+                "a", encoding="utf-8", buffering=1
+            )
         self.state: defaultdict[str, WorkloadState] = defaultdict(WorkloadState)
         self._quota_lock = Lock()
         self._signal_lock = Lock()
@@ -201,6 +218,7 @@ class QuotaServeCollector(KVCacheMetricsCollector):
                 self._drop_signal_event_locked(
                     victim, window.popleft(), expired=False
                 )
+        self.maybe_log_signal(now=now)
 
     def on_block_reused(
         self,
@@ -234,6 +252,7 @@ class QuotaServeCollector(KVCacheMetricsCollector):
             ):
                 self._useful_event_ids.add(id(event))
                 self._useful_evictions[victim] += 1
+        self.maybe_log_signal(now=now)
 
     def on_block_freed(
         self,
@@ -297,34 +316,78 @@ class QuotaServeCollector(KVCacheMetricsCollector):
         counter = self._shadow_expired if expired else self._shadow_dropped
         counter[workload] += 1
 
+    def _useful_eviction_snapshot_locked(
+        self,
+    ) -> dict[str, dict[str, int | float]]:
+        workloads = set(self._signal_windows)
+        workloads.update(self._useful_evictions)
+        return {
+            workload: {
+                "window_size": self._window_size,
+                "sample_count": len(self._signal_windows[workload]),
+                "cross_workload_evictions": len(
+                    self._signal_windows[workload]
+                ),
+                "useful_evictions": self._useful_evictions[workload],
+                "useful_eviction_ratio": (
+                    self._useful_evictions[workload]
+                    / len(self._signal_windows[workload])
+                    if self._signal_windows[workload]
+                    else 0.0
+                ),
+                "shadow_expired": self._shadow_expired[workload],
+                "shadow_dropped": self._shadow_dropped[workload],
+            }
+            for workload in sorted(workloads)
+        }
+
     def useful_eviction_snapshot(self) -> dict[str, dict[str, int | float]]:
         """Return current event-count windows and useful ratios."""
         with self._signal_lock:
             self._expire_signal_events_locked(time.time())
-            workloads = set(self._signal_windows)
-            workloads.update(self._useful_evictions)
-            return {
-                workload: {
-                    "window_size": self._window_size,
-                    "sample_count": len(self._signal_windows[workload]),
-                    "cross_workload_evictions": len(
-                        self._signal_windows[workload]
-                    ),
-                    "useful_evictions": self._useful_evictions[workload],
-                    "useful_eviction_ratio": (
-                        self._useful_evictions[workload]
-                        / len(self._signal_windows[workload])
-                        if self._signal_windows[workload]
-                        else 0.0
-                    ),
-                    "shadow_expired": self._shadow_expired[workload],
-                    "shadow_dropped": self._shadow_dropped[workload],
+            return self._useful_eviction_snapshot_locked()
+
+    def maybe_log_signal(
+        self,
+        now: float | None = None,
+        *,
+        force: bool = False,
+    ) -> int:
+        """Write one workload snapshot when the opportunistic tick is due."""
+        if self._signal_log_file is None:
+            return 0
+
+        current_time = time.time() if now is None else now
+        with self._signal_lock:
+            self._expire_signal_events_locked(current_time)
+            if (
+                not force
+                and self._last_signal_log_time is not None
+                and current_time - self._last_signal_log_time < self._tick_sec
+            ):
+                return 0
+
+            snapshot = self._useful_eviction_snapshot_locked()
+            for workload, values in snapshot.items():
+                record = {
+                    "type": "useful_eviction_signal",
+                    "ts": current_time,
+                    "workload": workload,
+                    **values,
                 }
-                for workload in sorted(workloads)
-            }
+                json.dump(record, self._signal_log_file, separators=(",", ":"))
+                self._signal_log_file.write("\n")
+            self._signal_log_file.flush()
+            self._last_signal_log_time = current_time
+            return len(snapshot)
+
+    def flush_signal_log(self, *, force: bool = True) -> int:
+        """Force the current signal snapshot to the quota log."""
+        return self.maybe_log_signal(force=force)
 
     def reset(self) -> None:
         """Clear occupancy after BlockPool resets every block membership flag."""
+        self.flush_signal_log()
         super().reset()
         with self._quota_lock:
             self.state.clear()

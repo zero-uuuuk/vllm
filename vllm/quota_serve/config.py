@@ -65,6 +65,7 @@ class QuotaServeConfig:
     mode: QuotaServeMode = "off"
     tick_sec: int = 30
     shadow_ttl_sec: int = 120
+    window_size: int = 1000
     workloads: Mapping[str, WorkloadQuota] = field(default_factory=dict)
     log_path: str | None = None
 
@@ -84,6 +85,11 @@ class QuotaServeConfig:
             raise ValueError(
                 f"shadow_ttl_sec must be positive, got {shadow_ttl_sec!r}"
             )
+        window_size = _expect_type(
+            "window_size", self.window_size, int, reject_bool=True
+        )
+        if window_size <= 0:
+            raise ValueError(f"window_size must be positive, got {window_size!r}")
         workloads = _coerce_workloads(self.workloads)
         log_path = _expect_type("log_path", self.log_path, str, optional=True)
 
@@ -91,6 +97,7 @@ class QuotaServeConfig:
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "tick_sec", tick_sec)
         object.__setattr__(self, "shadow_ttl_sec", shadow_ttl_sec)
+        object.__setattr__(self, "window_size", window_size)
         object.__setattr__(self, "workloads", workloads)
         object.__setattr__(self, "log_path", log_path)
 
@@ -127,6 +134,7 @@ class QuotaServeConfig:
             "mode",
             "shadow_ttl_sec",
             "tick_sec",
+            "window_size",
             "workloads",
         }
         unknown_keys = sorted(set(data) - allowed_keys)
@@ -141,6 +149,7 @@ class QuotaServeConfig:
             mode=data.get("mode", "off"),
             tick_sec=data.get("tick_sec", 30),
             shadow_ttl_sec=data.get("shadow_ttl_sec", 120),
+            window_size=data.get("window_size", 1000),
             workloads=data.get("workloads", {}),
             log_path=data.get("log_path"),
         )

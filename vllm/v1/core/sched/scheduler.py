@@ -102,6 +102,8 @@ class Scheduler(SchedulerInterface):
                 collect_residency_metrics=(
                     self.observability_config.kv_cache_metrics
                 ),
+                shadow_ttl_sec=self.quota_serve_config.shadow_ttl_sec,
+                window_size=self.quota_serve_config.window_size,
             )
         elif self.observability_config.kv_cache_metrics:
             self.kv_metrics_collector = KVCacheMetricsCollector(

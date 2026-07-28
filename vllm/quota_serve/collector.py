@@ -4,7 +4,8 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+import time
+from collections import defaultdict, deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from threading import Lock
@@ -91,11 +92,28 @@ class QuotaServeCollector(KVCacheMetricsCollector):
         sample_rate: float = 0.01,
         *,
         collect_residency_metrics: bool = False,
+        shadow_ttl_sec: float = 120,
+        window_size: int = 1000,
     ) -> None:
         super().__init__(sample_rate)
+        if shadow_ttl_sec <= 0:
+            raise ValueError("shadow_ttl_sec must be positive")
+        if window_size <= 0:
+            raise ValueError("window_size must be positive")
         self._collect_residency_metrics = collect_residency_metrics
+        self._shadow_ttl_sec = float(shadow_ttl_sec)
+        self._window_size = window_size
         self.state: defaultdict[str, WorkloadState] = defaultdict(WorkloadState)
         self._quota_lock = Lock()
+        self._signal_lock = Lock()
+        self._signal_windows: defaultdict[
+            str, deque[dict[str, object]]
+        ] = defaultdict(deque)
+        self._signal_event_ids: set[int] = set()
+        self._useful_event_ids: set[int] = set()
+        self._useful_evictions: defaultdict[str, int] = defaultdict(int)
+        self._shadow_expired: defaultdict[str, int] = defaultdict(int)
+        self._shadow_dropped: defaultdict[str, int] = defaultdict(int)
 
     @staticmethod
     def _owner(block: "KVCacheBlock") -> str:
@@ -162,6 +180,61 @@ class QuotaServeCollector(KVCacheMetricsCollector):
         """Count a newly cached block if it is already evictable."""
         self._sync_membership(block)
 
+    def on_eviction_recorded(self, event: Mapping[str, object]) -> None:
+        """Add a cross-workload eviction to the bounded signal window."""
+        with self._signal_lock:
+            now = time.time()
+            self._expire_signal_events_locked(now)
+
+            victim = event.get("evicted_workload")
+            if (
+                event.get("is_cross_workload") is not True
+                or not isinstance(victim, str)
+                or not victim
+            ):
+                return
+
+            window = self._signal_windows[victim]
+            window.append(event)  # Keep the same object for reuse matching.
+            self._signal_event_ids.add(id(event))
+            while len(window) > self._window_size:
+                self._drop_signal_event_locked(
+                    victim, window.popleft(), expired=False
+                )
+
+    def on_block_reused(
+        self,
+        event: Mapping[str, object],
+        request: "Request | None" = None,
+    ) -> None:
+        """Mark one pending cross-workload event useful at most once."""
+        requester_workload = infer_workload(
+            request.request_id if request is not None else None
+        )
+        with self._signal_lock:
+            now = time.time()
+            self._expire_signal_events_locked(now)
+
+            victim = event.get("evicted_workload")
+            if (
+                not isinstance(victim, str)
+                or id(event) not in self._signal_event_ids
+            ):
+                return
+            candidate_event = {
+                **event,
+                "useful_counted": id(event) in self._useful_event_ids,
+            }
+            if is_useful_eviction(
+                candidate_event,
+                requester_workload,
+                is_cache_miss=True,
+                now=now,
+                shadow_ttl_sec=self._shadow_ttl_sec,
+            ):
+                self._useful_event_ids.add(id(event))
+                self._useful_evictions[victim] += 1
+
     def on_block_freed(
         self,
         block: "KVCacheBlock",
@@ -194,11 +267,74 @@ class QuotaServeCollector(KVCacheMetricsCollector):
             self.state[owner].evictable_cached = current - 1
             block.is_counted_as_evictable_cached = False
 
+    def _expire_signal_events_locked(self, now: float) -> None:
+        for workload, window in self._signal_windows.items():
+            while window:
+                event = window[0]
+                eviction_time = event.get("eviction_time")
+                if (
+                    type(eviction_time) in (int, float)
+                    and now - eviction_time <= self._shadow_ttl_sec
+                ):
+                    break
+                self._drop_signal_event_locked(
+                    workload, window.popleft(), expired=True
+                )
+
+    def _drop_signal_event_locked(
+        self,
+        workload: str,
+        event: Mapping[str, object],
+        *,
+        expired: bool,
+    ) -> None:
+        self._signal_event_ids.discard(id(event))
+        was_useful = id(event) in self._useful_event_ids
+        self._useful_event_ids.discard(id(event))
+        if was_useful:
+            current = self._useful_evictions[workload]
+            self._useful_evictions[workload] = max(0, current - 1)
+        counter = self._shadow_expired if expired else self._shadow_dropped
+        counter[workload] += 1
+
+    def useful_eviction_snapshot(self) -> dict[str, dict[str, int | float]]:
+        """Return current event-count windows and useful ratios."""
+        with self._signal_lock:
+            self._expire_signal_events_locked(time.time())
+            workloads = set(self._signal_windows)
+            workloads.update(self._useful_evictions)
+            return {
+                workload: {
+                    "window_size": self._window_size,
+                    "sample_count": len(self._signal_windows[workload]),
+                    "cross_workload_evictions": len(
+                        self._signal_windows[workload]
+                    ),
+                    "useful_evictions": self._useful_evictions[workload],
+                    "useful_eviction_ratio": (
+                        self._useful_evictions[workload]
+                        / len(self._signal_windows[workload])
+                        if self._signal_windows[workload]
+                        else 0.0
+                    ),
+                    "shadow_expired": self._shadow_expired[workload],
+                    "shadow_dropped": self._shadow_dropped[workload],
+                }
+                for workload in sorted(workloads)
+            }
+
     def reset(self) -> None:
         """Clear occupancy after BlockPool resets every block membership flag."""
         super().reset()
         with self._quota_lock:
             self.state.clear()
+        with self._signal_lock:
+            self._signal_windows.clear()
+            self._signal_event_ids.clear()
+            self._useful_event_ids.clear()
+            self._useful_evictions.clear()
+            self._shadow_expired.clear()
+            self._shadow_dropped.clear()
 
     def occupancy_snapshot(self) -> dict[str, int]:
         """Return a stable workload-to-occupancy snapshot."""

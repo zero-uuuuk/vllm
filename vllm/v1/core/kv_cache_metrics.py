@@ -5,6 +5,7 @@
 import random
 import time
 from collections import deque
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -70,6 +71,8 @@ class KVCacheMetricsCollector:
     2) **신규 hook** — Case 1 계측에는 없던 진입점. base는 no-op이다.
          - on_block_cached(block, request)         : cache 등록 순간
          - on_block_freed(block, prev_ref, new_ref): ref_cnt 감소(특히 →0) 순간
+         - on_eviction_recorded(event)             : eviction event 생성 순간
+         - on_block_reused(event, request)         : pending eviction 재사용 확정
 
     모든 신규/확장 hook은 base에서 부작용이 없으므로, 정책이 꺼진 상태
     (mode=off)에서는 baseline LRU와 완전히 동일하게 동작한다.
@@ -189,6 +192,26 @@ class KVCacheMetricsCollector:
         (``new_ref_cnt == 0 and is_cached``)에서 occupancy에 추가한다.
         prev/new ref_cnt를 함께 넘기지만 base는 no-op이다.
         """
+        return None
+
+    def on_block_reused(
+        self,
+        event: Mapping[str, object],
+        request: "Request | None" = None,
+    ) -> None:
+        """Notify the collector when a pending eviction is reused.
+
+        호출 지점: ``BlockPool._complete_pending_reuse()``.
+        ``request``는 eviction된 prefix를 실제로 다시 계산한 요청이다.
+        PR5-2에서는 callback 경로만 연결하고, QuotaServe의 useful eviction
+        집계는 이후 PR에서 이 hook을 override한다. base는 no-op이다.
+        """
+        del event, request
+        return None
+
+    def on_eviction_recorded(self, event: Mapping[str, object]) -> None:
+        """Notify the collector when an eviction enters the shadow window."""
+        del event
         return None
 
     def reset(self) -> None:

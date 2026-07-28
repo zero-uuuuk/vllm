@@ -1,7 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.quota_serve.collector import is_useful_eviction
+from unittest.mock import patch
+
+from vllm.quota_serve.collector import (
+    QuotaServeCollector,
+    is_useful_eviction,
+)
+from vllm.v1.core.block_pool import BlockPool
 
 
 def _event(**overrides: object) -> dict[str, object]:
@@ -33,3 +39,70 @@ def test_pr5_useful_eviction_contract() -> None:
     assert not is_useful_eviction(
         _event(), "chat", is_cache_miss=True, now=221.0, shadow_ttl_sec=120.0
     )
+
+
+def test_pr5_reuse_hook_receives_request(monkeypatch) -> None:
+    class FakeCollector:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def on_block_reused(self, event, request) -> None:
+            self.calls.append((event, request))
+
+    pool = BlockPool.__new__(BlockPool)
+    pool._pending_evictions = {b"hash": [_event()]}
+    pool._pending_evictions_count = 1
+    pool.metrics_collector = FakeCollector()
+    request = object()
+
+    monkeypatch.setattr(
+        "vllm.v1.core.block_pool._log_eviction_event", lambda event: None
+    )
+    pool._complete_pending_reuse(b"hash", request)
+
+    assert pool.metrics_collector.calls[0][1] is request
+
+
+def test_pr5_window_counts_useful_once_and_expires() -> None:
+    collector = QuotaServeCollector(
+        sample_rate=1.0, shadow_ttl_sec=10, window_size=2
+    )
+    event = _event(eviction_time=100.0)
+
+    with patch("vllm.quota_serve.collector.time.time", return_value=100.0):
+        collector.on_eviction_recorded(event)
+    with patch("vllm.quota_serve.collector.time.time", return_value=105.0):
+        request = type("Request", (), {"request_id": "chat_smoke_0"})()
+        collector.on_block_reused(event, request)
+        collector.on_block_reused(event, request)
+
+    with patch("vllm.quota_serve.collector.time.time", return_value=105.0):
+        snapshot = collector.useful_eviction_snapshot()["chat"]
+    assert snapshot["sample_count"] == 1
+    assert snapshot["useful_evictions"] == 1
+    assert snapshot["useful_eviction_ratio"] == 1.0
+
+    with patch("vllm.quota_serve.collector.time.time", return_value=111.0):
+        expired_snapshot = collector.useful_eviction_snapshot()["chat"]
+    assert expired_snapshot["sample_count"] == 0
+    assert expired_snapshot["useful_evictions"] == 0
+    assert expired_snapshot["shadow_expired"] == 1
+
+
+def test_pr5_window_drops_oldest_event() -> None:
+    collector = QuotaServeCollector(
+        sample_rate=1.0, shadow_ttl_sec=120, window_size=2
+    )
+
+    with patch("vllm.quota_serve.collector.time.time", return_value=102.0):
+        for eviction_time in (100.0, 101.0, 102.0):
+            collector.on_eviction_recorded(
+                _event(eviction_time=eviction_time)
+            )
+
+        snapshot = collector.useful_eviction_snapshot()["chat"]
+
+    assert snapshot["sample_count"] == 2
+    assert snapshot["cross_workload_evictions"] == 2
+    assert snapshot["useful_evictions"] == 0
+    assert snapshot["shadow_dropped"] == 1

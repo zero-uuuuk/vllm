@@ -343,7 +343,7 @@ class BlockPool:
             blk.block_index = num_cached_blocks + i
             blk.last_access_time = time.time()
             self.cached_block_hash_to_block.insert(block_hash_with_group_id, blk)
-            self._complete_pending_reuse(bytes(block_hash))
+            self._complete_pending_reuse(bytes(block_hash), request)
             # ===== QuotaServe Hook #3: on_block_cached (cache 등록 순간) =====
             # 이 insert로 block이 prefix cache에 등록된다(is_cached: F → T).
             # PR3 collector는 이 is_cached 전이 직후 block의 occupancy 포함 여부를
@@ -538,7 +538,11 @@ class BlockPool:
             )
         return True
 
-    def _complete_pending_reuse(self, raw_hash_bytes: bytes) -> None:
+    def _complete_pending_reuse(
+        self,
+        raw_hash_bytes: bytes,
+        request: Request | None = None,
+    ) -> None:
         if self._pending_evictions_count == 0:
             return
         pending_list = self._pending_evictions.get(raw_hash_bytes)
@@ -553,6 +557,8 @@ class BlockPool:
             time.time() - event["eviction_time"], 6
         )
         _log_eviction_event(event)
+        if self.metrics_collector:
+            self.metrics_collector.on_block_reused(event, request)
 
     def _remember_eviction_event(
         self,
@@ -561,7 +567,7 @@ class BlockPool:
         trigger_request: Request | None,
         selection: VictimSelection | None = None,
     ) -> None:
-        if _eviction_log_file is None:
+        if _eviction_log_file is None and self.metrics_collector is None:
             return
         raw_hash_bytes = bytes(get_block_hash(block_hash))
         evictor_workload = _request_workload(trigger_request)
@@ -611,6 +617,8 @@ class BlockPool:
             "reused_later": False,
             "time_until_next_reuse": None,
         }
+        if self.metrics_collector:
+            self.metrics_collector.on_eviction_recorded(event)
         if self._pending_evictions_count >= _MAX_PENDING_EVICTIONS:
             oldest_key = next(iter(self._pending_evictions))
             oldest_list = self._pending_evictions[oldest_key]

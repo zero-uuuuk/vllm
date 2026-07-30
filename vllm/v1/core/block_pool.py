@@ -38,6 +38,7 @@ logger = init_logger(__name__)
 
 _MAX_PENDING_EVICTIONS = 200_000
 _eviction_log_path: str | None = os.environ.get("VLLM_EVICTION_LOG")
+_quota_base_probe_enabled = os.environ.get("VLLM_QUOTA_BASE_PROBE", "0") == "1"
 
 VictimSelector = Callable[
     [FreeKVCacheBlockQueue, Request | None],
@@ -603,6 +604,7 @@ class BlockPool:
             victim_quota = None
             occupancy_snapshot = {}
             scan_steps = None
+
         event: dict[str, Any] = {
             "evicted_workload": block.workload_tag,
             "trigger_workload": evictor_workload,
@@ -622,6 +624,19 @@ class BlockPool:
             "reused_later": False,
             "time_until_next_reuse": None,
         }
+
+        if _quota_base_probe_enabled:
+            # total_blocks - running_blocks를 quota_base 후보로 보기 위해
+            # eviction 시점의 running block 수를 기록한다.
+            running_blocks = sum(
+                1
+                for candidate in self.blocks # NOTE: O(n) scan이니 flag는 기본 미사용
+                if not candidate.is_null and candidate.ref_cnt > 0
+            )
+            event["total_blocks"] = self.num_gpu_blocks
+            event["running_blocks"] = running_blocks
+            event["quota_base_candidate"] = self.num_gpu_blocks - running_blocks
+
         if self.metrics_collector:
             self.metrics_collector.on_eviction_recorded(event)
         if self._pending_evictions_count >= _MAX_PENDING_EVICTIONS:

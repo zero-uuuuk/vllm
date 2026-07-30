@@ -88,11 +88,21 @@ class Scheduler(SchedulerInterface):
         self.log_stats = log_stats
         self.observability_config = vllm_config.observability_config
         self.quota_serve_config = load_quota_serve_config()
+
+        # quota_base_blocks가 없으면 기존 전체 KV block 수로 fallback 
+        quota_base_blocks = (
+            self.quota_serve_config.quota_base_blocks
+            if self.quota_serve_config.quota_base_blocks is not None
+            else kv_cache_config.num_blocks
+        )
+        
         logger.info(
-            "QuotaServe config: enabled=%s mode=%s active=%s workloads=%s",
+            "QuotaServe config: enabled=%s mode=%s active=%s "
+            "quota_base_blocks=%s workloads=%s",
             self.quota_serve_config.enabled,
             self.quota_serve_config.mode,
             self.quota_serve_config.is_active,
+            quota_base_blocks,
             sorted(self.quota_serve_config.workloads),
         )
         self.kv_metrics_collector: KVCacheMetricsCollector | None = None
@@ -123,7 +133,7 @@ class Scheduler(SchedulerInterface):
             self.victim_selector = QuotaAwareVictimSelector(
                 self.quota_serve_config,
                 self.kv_metrics_collector.occupancy_snapshot,
-                kv_cache_config.num_blocks,
+                quota_base_blocks,
             )
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder

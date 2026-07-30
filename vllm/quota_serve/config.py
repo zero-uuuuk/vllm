@@ -66,6 +66,7 @@ class QuotaServeConfig:
     tick_sec: int = 30
     shadow_ttl_sec: int = 120
     window_size: int = 1000
+    quota_base_blocks: int | None = None
     workloads: Mapping[str, WorkloadQuota] = field(default_factory=dict)
     log_path: str | None = None
 
@@ -90,6 +91,21 @@ class QuotaServeConfig:
         )
         if window_size <= 0:
             raise ValueError(f"window_size must be positive, got {window_size!r}")
+
+        # YAML에 quota_base_blocks를 넣었을 때 양수 정수인지 검증
+        quota_base_blocks = _expect_type(
+            "quota_base_blocks",
+            self.quota_base_blocks,
+            int,
+            optional=True,
+            reject_bool=True,
+        )
+        if quota_base_blocks is not None and quota_base_blocks <= 0:
+            raise ValueError(
+                "quota_base_blocks must be positive, "
+                f"got {quota_base_blocks!r}"
+            )
+        
         workloads = _coerce_workloads(self.workloads)
         log_path = _expect_type("log_path", self.log_path, str, optional=True)
 
@@ -98,6 +114,7 @@ class QuotaServeConfig:
         object.__setattr__(self, "tick_sec", tick_sec)
         object.__setattr__(self, "shadow_ttl_sec", shadow_ttl_sec)
         object.__setattr__(self, "window_size", window_size)
+        object.__setattr__(self, "quota_base_blocks", quota_base_blocks)
         object.__setattr__(self, "workloads", workloads)
         object.__setattr__(self, "log_path", log_path)
 
@@ -132,6 +149,7 @@ class QuotaServeConfig:
             "enabled",
             "log_path",
             "mode",
+            "quota_base_blocks",
             "shadow_ttl_sec",
             "tick_sec",
             "window_size",
@@ -150,6 +168,7 @@ class QuotaServeConfig:
             tick_sec=data.get("tick_sec", 30),
             shadow_ttl_sec=data.get("shadow_ttl_sec", 120),
             window_size=data.get("window_size", 1000),
+            quota_base_blocks=data.get("quota_base_blocks"),
             workloads=data.get("workloads", {}),
             log_path=data.get("log_path"),
         )

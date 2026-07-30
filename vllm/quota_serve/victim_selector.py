@@ -111,6 +111,12 @@ class QuotaAwareVictimSelector:
         # ratio를 정수 occupancy와 비교하려면 공통 absolute 기준이 필요하다.
         # static mode에서는 이 기준값을 고정해서 사용한다.
         self.quota_base_blocks = quota_base_blocks
+
+        # 설정 ratio 합이 pool을 초과할 때만 normalize한다. 예: 0.8 + 0.7 -> scale 1.5.
+        self._quota_ratio_scale = max(
+            1.0,
+            sum(quota.quota_ratio for quota in quota_config.workloads.values()),
+        )
         # Kept for the caller/logger; setting this does not change queue state.
         # 호출자와 logger가 마지막 선택 결과를 확인할 수 있도록 저장한다.
         # 이 값을 저장하는 것만으로 queue 상태가 바뀌지는 않는다.
@@ -272,6 +278,11 @@ class QuotaAwareVictimSelector:
         # 설정된 ratio를 occupancy 비교에 사용할 정수 block 수로 변환한다.
         # static mode에서는 base를 고정해서 사용한다.
         quota_ratio = self.quota_config.quota_for(workload).quota_ratio
+
+        # 설정된 workload의 quota ratio 합이 1을 넘으면 scale로 나눠 보정한다.
+        # 예: 0.8 / 1.5 * 150 = 80 blocks.
+        if workload in self.quota_config.workloads:
+            quota_ratio /= self._quota_ratio_scale
         return int(quota_ratio * self.quota_base_blocks)
 
     def _decision(

@@ -8,10 +8,11 @@ from typing import Literal, overload
 
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
+from vllm.v1.core.block_pool import WorkloadEvictionStats
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -150,6 +151,21 @@ class KVCacheManager:
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
 
+        # Rerequest observation currently covers only the experiment's plain APC.
+        spec = (
+            kv_cache_config.kv_cache_groups[0].kv_cache_spec
+            if self.num_kv_cache_groups == 1
+            else None
+        )
+        self._supports_workload_rerequest = (
+            type(spec) is FullAttentionSpec
+            and spec.sliding_window is None
+            and spec.attention_chunk_size is None
+            and dcp_world_size == 1
+            and pcp_world_size == 1
+            and not self.coordinator.eagle_group_ids
+        )
+
         # Pre-constructed KVCacheBlocks with no blocks, callers should use this
         # via create_kv_cache_blocks instead of creating new ones to avoid GC
         # overhead.
@@ -180,6 +196,16 @@ class KVCacheManager:
         self.prefix_cache_stats = PrefixCacheStats()
         return stats
 
+    def get_workload_eviction_stats(
+        self, trigger_workload: str, victim_workload: str
+    ) -> WorkloadEvictionStats | None:
+        """Snapshot one direction, or None when rerequest observation is unsupported."""
+        if not self.enable_caching or not self._supports_workload_rerequest:
+            return None
+        return self.block_pool.get_workload_eviction_stats(
+            trigger_workload, victim_workload
+        )
+
     def get_computed_blocks(self, request: Request) -> tuple[KVCacheBlocks, int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
@@ -198,6 +224,10 @@ class KVCacheManager:
         # or calls a pooling model with all pooling).
         if not self.enable_caching or request.skip_reading_prefix_cache:
             return self.empty_kv_cache_blocks, 0
+
+        # Track workload re-requests only for supported, non-resumable requests.
+        if self._supports_workload_rerequest and not request.resumable:
+            self.block_pool.observe_workload_rerequest(request)
 
         # NOTE: When all tokens hit the cache, we must recompute the last token
         # to obtain logits. Thus, set max_cache_hit_length to prompt_length - 1.

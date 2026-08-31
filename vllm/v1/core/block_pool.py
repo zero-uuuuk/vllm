@@ -3,7 +3,9 @@
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from itertools import islice
 from typing import Any
+from weakref import WeakSet
 
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
@@ -45,6 +47,21 @@ class WorkloadEvictionEvent:
     @property
     def is_cross_workload(self) -> bool:
         return self.victim_workload != self.trigger_workload
+
+
+@dataclass(frozen=True, slots=True)
+class WorkloadEvictionStats:
+    """Physical eviction counts for one direction since creation or cache reset."""
+
+    eviction_count: int
+    useful_eviction_count: int
+
+    @property
+    def useful_ratio(self) -> float | None:
+        """Fraction rerequested by the owner so far, not eviction-caused misses."""
+        if self.eviction_count == 0:
+            return None
+        return self.useful_eviction_count / self.eviction_count
 
 
 class BlockHashToBlockMap:
@@ -195,9 +212,17 @@ class BlockPool:
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
 
+        # ponytail: Benchmark output records grow until reported/reset; pending
+        # evictions remain until matched/reset. Do not enable this collection
+        # for an unbounded serving run without a retention policy.
         self._workload_eviction_events: list[WorkloadEvictionEvent] = []
+        self._pending_workload_evictions: dict[
+            tuple[BlockHashWithGroupId, str], Counter[str]
+        ] = {}
+        self._observed_workload_requests: WeakSet[Request] = WeakSet()
         # Keys are (trigger_workload, victim_workload); counts persist until reset.
         self._workload_eviction_counts: Counter[tuple[str, str]] = Counter()
+        self._useful_workload_eviction_counts: Counter[tuple[str, str]] = Counter()
 
         self.metrics_collector = metrics_collector
 
@@ -419,6 +444,10 @@ class BlockPool:
                 trigger_workload=trigger_workload,  # Workload requesting allocation.
             )
             self._workload_eviction_events.append(event)
+            pending = self._pending_workload_evictions.setdefault(
+                (block_hash, event.victim_workload), Counter()
+            )
+            pending[event.trigger_workload] += 1
             self._workload_eviction_counts[
                 (event.trigger_workload, event.victim_workload)
             ] += 1
@@ -513,7 +542,10 @@ class BlockPool:
             block.reset_hash()
 
         self._workload_eviction_events.clear()
+        self._pending_workload_evictions.clear()
+        self._observed_workload_requests.clear()
         self._workload_eviction_counts.clear()
+        self._useful_workload_eviction_counts.clear()
 
         if self.metrics_collector:
             self.metrics_collector.reset()
@@ -545,6 +577,41 @@ class BlockPool:
         if not total_gpu_blocks:
             return 0
         return 1.0 - (self.get_num_free_blocks() / total_gpu_blocks)
+
+    def observe_workload_rerequest(self, request: Request) -> None:
+        """Observe a first prompt lookup in the supported single-group APC path."""
+        if request in self._observed_workload_requests or request.num_preemptions > 0:
+            return
+        # Remember the first lookup even when there is nothing pending yet.
+        self._observed_workload_requests.add(request)
+
+        sampling_params = request.sampling_params
+        extra_args = (sampling_params.extra_args or {}) if sampling_params else {}
+        workload = extra_args.get("workload", "")
+        if not self._pending_workload_evictions:
+            return
+
+        # Exclude generated tokens and the final token that APC must recompute.
+        num_full_blocks = max(0, request.num_prompt_tokens - 1) // self.hash_block_size
+        for block_hash in islice(request.block_hashes, num_full_blocks):
+            key = make_block_hash_with_group_id(block_hash, 0)
+            pending = self._pending_workload_evictions.pop((key, workload), None)
+            if not pending:
+                continue
+            for trigger_workload, count in pending.items():
+                self._useful_workload_eviction_counts[(trigger_workload, workload)] += (
+                    count
+                )
+
+    def get_workload_eviction_stats(
+        self, trigger_workload: str, victim_workload: str
+    ) -> WorkloadEvictionStats:
+        """Snapshot one direction without draining; the manager checks support."""
+        key = (trigger_workload, victim_workload)
+        return WorkloadEvictionStats(
+            eviction_count=self._workload_eviction_counts[key],
+            useful_eviction_count=self._useful_workload_eviction_counts[key],
+        )
 
     def get_workload_eviction_events(self) -> list[WorkloadEvictionEvent]:
         """Return allocation-driven workload evictions without draining them."""

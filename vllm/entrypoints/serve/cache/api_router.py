@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from fastapi import APIRouter, FastAPI, Query, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from fastapi.responses import Response
 
 import vllm.envs as envs
@@ -30,17 +30,18 @@ async def reset_prefix_cache(
     Optionally, if the query parameter `reset_external=true`
     also resets the external (connector-managed) prefix cache.
 
-    Note that we currently do not check if the prefix cache
-    is successfully reset in the API server.
+    Return HTTP 409 if active requests prevent the cache from being reset.
 
     Example:
        POST /reset_prefix_cache?reset_external=true
     """
     logger.info("Resetting prefix cache...")
 
-    await engine_client(raw_request).reset_prefix_cache(
+    reset = await engine_client(raw_request).reset_prefix_cache(
         reset_running_requests, reset_external
     )
+    if not reset:
+        raise HTTPException(status_code=409, detail="Prefix cache reset failed.")
     return Response(status_code=200)
 
 

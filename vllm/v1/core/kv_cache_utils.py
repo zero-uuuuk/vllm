@@ -130,6 +130,9 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
+    # Workload that created this cached block.
+    workload_tag: str = ""
+
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
         return self._block_hash
@@ -142,8 +145,9 @@ class KVCacheBlock:
         self._block_hash = block_hash
 
     def reset_hash(self):
-        """Reset the block hash when the block is evicted."""
+        """Reset the block hash and workload tag when the block is evicted."""
         self._block_hash = None
+        self.workload_tag = ""
 
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__

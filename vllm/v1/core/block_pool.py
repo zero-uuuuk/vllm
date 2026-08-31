@@ -236,6 +236,14 @@ class BlockPool:
         """
         if num_cached_blocks >= num_full_blocks:
             return
+
+        # Tag only newly cached blocks, preserving the creator on cache hits.
+        workload_tag = (
+            (request.sampling_params.extra_args or {}).get("workload", "")
+            if request.sampling_params
+            else ""
+        )
+
         new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
         assert len(request.block_hashes) >= num_full_blocks
         if block_size == self.hash_block_size:
@@ -269,6 +277,7 @@ class BlockPool:
                 block_hash, kv_cache_group_id
             )
             blk.block_hash = block_hash_with_group_id
+            blk.workload_tag = workload_tag
             self.cached_block_hash_to_block.insert(block_hash_with_group_id, blk)
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))

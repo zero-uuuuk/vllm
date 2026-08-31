@@ -606,6 +606,9 @@ class EngineCore:
             reset_running_requests, reset_connector
         )
 
+    def write_workload_eviction_report(self, path: str) -> dict[str, Any]:
+        return self.scheduler.write_workload_eviction_report(path)
+
     def reset_encoder_cache(self) -> None:
         """Reset the encoder cache to invalidate all cached encoder outputs.
 

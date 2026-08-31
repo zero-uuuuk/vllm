@@ -896,6 +896,9 @@ class AsyncLLM(EngineClient):
             reset_running_requests, reset_connector
         )
 
+    async def write_workload_eviction_report(self, path: str) -> dict[str, Any]:
+        return await self.engine_core.write_workload_eviction_report_async(path)
+
     async def reset_encoder_cache(self) -> None:
         await self.engine_core.reset_encoder_cache_async()
 

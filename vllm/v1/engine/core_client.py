@@ -229,6 +229,9 @@ class EngineCoreClient(ABC):
     ) -> bool:
         raise NotImplementedError
 
+    async def write_workload_eviction_report_async(self, path: str) -> dict[str, Any]:
+        raise NotImplementedError
+
     async def reset_encoder_cache_async(self) -> None:
         raise NotImplementedError
 
@@ -1089,6 +1092,9 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async(
             "reset_prefix_cache", reset_running_requests, reset_connector
         )
+
+    async def write_workload_eviction_report_async(self, path: str) -> dict[str, Any]:
+        return await self.call_utility_async("write_workload_eviction_report", path)
 
     async def reset_encoder_cache_async(self) -> None:
         await self.call_utility_async("reset_encoder_cache")

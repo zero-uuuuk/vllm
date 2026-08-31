@@ -147,6 +147,11 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def write_workload_eviction_report(self, path: str) -> dict[str, Any]:
+        """Write workload evictions as JSONL and return summary statistics."""
+        ...
+
+    @abstractmethod
     async def sleep(self, level: int = 1, mode: "PauseMode" = "abort") -> None:
         """Sleep the engine"""
         ...

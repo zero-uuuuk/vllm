@@ -67,6 +67,27 @@ async def reset_encoder_cache(raw_request: Request):
     return Response(status_code=200)
 
 
+@router.post("/workload_eviction_report")
+async def write_workload_eviction_report(
+    raw_request: Request, path: str | None = Query(default=None)
+):
+    """Write workload evictions as JSONL and return summary statistics.
+
+    The fixed endpoint can be called by an external benchmark client. The
+    output path may be passed as ``?path=...`` or configured with
+    ``VLLM_WORKLOAD_EVICTION_LOG_PATH``.
+    """
+    path = path or envs.VLLM_WORKLOAD_EVICTION_LOG_PATH
+    if not path:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide a report path with ?path= or "
+            "VLLM_WORKLOAD_EVICTION_LOG_PATH.",
+        )
+    logger.info("Writing workload eviction report to %s", path)
+    return await engine_client(raw_request).write_workload_eviction_report(path)
+
+
 def attach_router(app: FastAPI):
     if not envs.VLLM_SERVER_DEV_MODE:
         return

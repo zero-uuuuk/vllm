@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     VLLM_LOGGING_PREFIX: str = ""
     VLLM_LOGGING_STREAM: str = "ext://sys.stdout"
     VLLM_LOGGING_CONFIG_PATH: str | None = None
+    VLLM_WORKLOAD_EVICTION_LOG_PATH: str | None = None
     VLLM_LOGGING_COLOR: str = "auto"
     NO_COLOR: bool = False
     VLLM_LOG_STATS_INTERVAL: float = 10.0
@@ -691,6 +692,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_CONFIGURE_LOGGING", "1"))
     ),
     "VLLM_LOGGING_CONFIG_PATH": lambda: os.getenv("VLLM_LOGGING_CONFIG_PATH"),
+    # Default path for on-demand workload eviction reports.
+    "VLLM_WORKLOAD_EVICTION_LOG_PATH": lambda: os.getenv("VLLM_WORKLOAD_EVICTION_LOG_PATH"),
     # this is used for configuring the default logging level
     "VLLM_LOGGING_LEVEL": lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO").upper(),
     # this is used for configuring the default logging stream

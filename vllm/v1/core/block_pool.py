@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections import Counter
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from vllm.distributed.kv_events import (
@@ -29,6 +31,20 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class WorkloadEvictionEvent:
+    """A physical cached block evicted to satisfy a workload's allocation."""
+
+    block_id: int
+    block_hash: BlockHashWithGroupId
+    victim_workload: str
+    trigger_workload: str
+
+    @property
+    def is_cross_workload(self) -> bool:
+        return self.victim_workload != self.trigger_workload
 
 
 class BlockHashToBlockMap:
@@ -179,6 +195,10 @@ class BlockPool:
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
 
+        self._workload_eviction_events: list[WorkloadEvictionEvent] = []
+        # Keys are (trigger_workload, victim_workload); counts persist until reset.
+        self._workload_eviction_counts: Counter[tuple[str, str]] = Counter()
+
         self.metrics_collector = metrics_collector
 
     def get_cached_block(
@@ -328,13 +348,14 @@ class BlockPool:
                 )
             )
 
-    def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
+    def get_new_blocks(self, num_blocks: int, workload: str = "") -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
         Note that we do not check block cache in this function.
 
         Args:
             num_blocks: The number of blocks to allocate.
+            workload: Workload requesting allocation, for eviction attribution.
 
         Returns:
             A list of new block.
@@ -347,7 +368,7 @@ class BlockPool:
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
             for block in ret:
-                self._maybe_evict_cached_block(block)
+                self._maybe_evict_cached_block(block, workload)
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
                 if self.metrics_collector:
@@ -360,13 +381,16 @@ class BlockPool:
                     self.metrics_collector.on_block_allocated(block)
         return ret
 
-    def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
+    def _maybe_evict_cached_block(
+        self, block: KVCacheBlock, trigger_workload: str = ""
+    ) -> bool:
         """
         If a block is cached in `cached_block_hash_to_block`, we reset its hash
         metadata and evict it from the cache.
 
         Args:
             block: The block to evict.
+            trigger_workload: Allocating workload; empty for explicit invalidation.
 
         Returns:
             True if the block is evicted, False otherwise.
@@ -384,6 +408,20 @@ class BlockPool:
             # block not found in cached_block_hash_to_block,
             # eviction is not needed
             return False
+
+        # Record only real blocks with both workloads known; explicit
+        # invalidation has no trigger_workload and is excluded.
+        if not block.is_null and block.workload_tag and trigger_workload:
+            event = WorkloadEvictionEvent(
+                block_id=block.block_id,
+                block_hash=block_hash,
+                victim_workload=block.workload_tag,  # Owner of the evicted cache.
+                trigger_workload=trigger_workload,  # Workload requesting allocation.
+            )
+            self._workload_eviction_events.append(event)
+            self._workload_eviction_counts[
+                (event.trigger_workload, event.victim_workload)
+            ] += 1
 
         block.reset_hash()
 
@@ -474,6 +512,9 @@ class BlockPool:
         for block in self.blocks:
             block.reset_hash()
 
+        self._workload_eviction_events.clear()
+        self._workload_eviction_counts.clear()
+
         if self.metrics_collector:
             self.metrics_collector.reset()
 
@@ -504,6 +545,10 @@ class BlockPool:
         if not total_gpu_blocks:
             return 0
         return 1.0 - (self.get_num_free_blocks() / total_gpu_blocks)
+
+    def get_workload_eviction_events(self) -> list[WorkloadEvictionEvent]:
+        """Return allocation-driven workload evictions without draining them."""
+        return self._workload_eviction_events
 
     def take_events(self) -> list[KVCacheEvent]:
         """Atomically takes all events and clears the queue.

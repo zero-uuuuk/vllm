@@ -129,6 +129,7 @@ class KVCacheCoordinator(ABC):
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
+        workload: str = "",
     ) -> None:
         """
         Add the new computed blocks to the request. Optionally allocate new
@@ -140,6 +141,7 @@ class KVCacheCoordinator(ABC):
                 prefix cache.
             num_local_computed_tokens: The number of local computed tokens.
             num_external_computed_tokens: The number of external computed tokens.
+            workload: Workload requesting allocation, for eviction attribution.
         """
         for i, manager in enumerate(self.single_type_managers):
             manager.allocate_new_computed_blocks(
@@ -147,6 +149,7 @@ class KVCacheCoordinator(ABC):
                 new_computed_blocks[i],
                 num_local_computed_tokens,
                 num_external_computed_tokens,
+                workload=workload,
             )
 
     def allocate_new_blocks(
@@ -155,6 +158,7 @@ class KVCacheCoordinator(ABC):
         num_tokens: int,
         num_tokens_main_model: int,
         num_encoder_tokens: int = 0,
+        workload: str = "",
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Allocate new blocks for the request to give it at least `num_tokens`
@@ -169,6 +173,7 @@ class KVCacheCoordinator(ABC):
                 with spec decode, it is num_tokens - num_lookahead_tokens.
             num_encoder_tokens: The number of encoder tokens for allocating
                 blocks for cross-attention.
+            workload: Workload requesting allocation, for eviction attribution.
 
         Returns:
             The new allocated blocks.
@@ -180,6 +185,7 @@ class KVCacheCoordinator(ABC):
                 if isinstance(manager, CrossAttentionManager)
                 else num_tokens,
                 num_tokens_main_model,
+                workload=workload,
             )
             for manager in self.single_type_managers
         )

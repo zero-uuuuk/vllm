@@ -395,6 +395,11 @@ class KVCacheManager:
             # Cannot allocate new blocks
             return None
 
+        sampling_params = request.sampling_params
+        extra_args = (sampling_params.extra_args or {}) if sampling_params else {}
+        workload = extra_args.get("workload", "")
+        workload = workload if isinstance(workload, str) else ""
+
         if (
             new_computed_block_list is not self.empty_kv_cache_blocks.blocks
             or num_external_computed_tokens > 0
@@ -406,6 +411,7 @@ class KVCacheManager:
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
+                workload=workload,
             )
 
         new_blocks = self.coordinator.allocate_new_blocks(
@@ -413,6 +419,7 @@ class KVCacheManager:
             num_tokens_need_slot,
             num_tokens_main_model,
             num_encoder_tokens,
+            workload=workload,
         )
 
         # P/D: delay caching blocks if we have to recv from

@@ -51,6 +51,7 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
+from vllm.v1.core.workload_eviction_log import write_workload_eviction_report
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
@@ -1998,6 +1999,19 @@ class Scheduler(SchedulerInterface):
             self.kv_event_publisher.shutdown()
         if self.connector is not None:
             self.connector.shutdown()
+
+    def write_workload_eviction_report(self, path: str) -> dict[str, Any]:
+        """Write workload evictions as JSONL and return summary statistics."""
+        if (
+            self.kv_cache_manager.get_workload_eviction_stats("", "") is None
+            or self.parallel_config.data_parallel_size != 1
+            or self.connector is not None
+        ):
+            raise ValueError(
+                "Workload eviction reporting requires single-group Full Attention "
+                "APC, DCP=PCP=DP=1, no EAGLE and no KV connector."
+            )
+        return write_workload_eviction_report(path, self.kv_cache_manager.block_pool)
 
     ########################################################################
     # KV Connector Related Methods

@@ -3,7 +3,7 @@
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 
@@ -211,6 +211,11 @@ class SchedulerInterface(ABC):
                 will only reset the KV prefix cache when there is no running request
                 taking KV cache.
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    def write_workload_eviction_report(self, path: str) -> dict[str, Any]:
+        """Write workload evictions as JSONL and return summary statistics."""
         raise NotImplementedError
 
     @abstractmethod

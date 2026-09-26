@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -183,6 +184,8 @@ class BlockPool:
         self.eviction_policy = create_block_eviction_policy(
             self.blocks, self.free_block_queue, enable_caching
         )
+        # 마지막 stats 수집 이후 실제로 재할당된 cached block의 선택 경로.
+        self._eviction_counts: defaultdict[str, int] = defaultdict(int)
 
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
@@ -346,16 +349,22 @@ class BlockPool:
 
         # 정책은 free block의 선택만 바꾼다. hash 제거와 참조 수 갱신은 이 풀이 맡는다.
         policy = self.eviction_policy
-        ret: list[KVCacheBlock] = (
+        selected = (
             [policy.take_free_block() for _ in range(num_blocks)]
             if policy is not None
-            else self.free_block_queue.popleft_n(num_blocks)
+            else [
+                (block, "lru")
+                for block in self.free_block_queue.popleft_n(num_blocks)
+            ]
         )
+        ret = [block for block, _ in selected]
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
-            for block in ret:
-                self._maybe_evict_cached_block(block)
+            for block, reason in selected:
+                if self._maybe_evict_cached_block(block):
+                    assert reason is not None
+                    self._eviction_counts[reason] += 1
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
                 if self.metrics_collector:
@@ -367,6 +376,12 @@ class BlockPool:
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
         return ret
+
+    def take_eviction_counts(self) -> dict[str, int]:
+        """Return and clear cached-block eviction counts since the last read."""
+        counts = dict(self._eviction_counts)
+        self._eviction_counts.clear()
+        return counts
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
         """

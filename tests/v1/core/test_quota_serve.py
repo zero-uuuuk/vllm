@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
+from unittest.mock import Mock
 
 import pytest
 
@@ -131,6 +132,7 @@ def test_uncached_free_block_before_cached_victim(monkeypatch) -> None:
     pool.free_blocks([cached, uncached])
 
     assert pool.get_new_blocks(1) == [uncached]
+    assert pool.take_eviction_counts() == {}
     assert cached.block_hash is not None
     assert held.ref_cnt == 1
 
@@ -144,12 +146,31 @@ def test_default_mode_keeps_global_lru(monkeypatch) -> None:
 
     assert pool.eviction_policy is None
     assert pool.get_new_blocks(1) == [cached]
+    assert pool.take_eviction_counts() == {"lru": 1}
 
 
 def test_explicit_lru_keeps_global_lru(monkeypatch) -> None:
     monkeypatch.setenv("EVICTION_POLICY", "lru")
     pool = BlockPool(num_gpu_blocks=2, enable_caching=True, hash_block_size=16)
     assert pool.eviction_policy is None
+
+
+def test_eviction_count_accepts_another_policy(monkeypatch) -> None:
+    monkeypatch.setenv("EVICTION_POLICY", "lru")
+    pool = BlockPool(num_gpu_blocks=2, enable_caching=True, hash_block_size=16)
+    block = pool.get_new_blocks(1)[0]
+    _cache(pool, block, "chat")
+    pool.free_blocks([block])
+
+    policy = Mock()
+    policy.take_free_block.side_effect = lambda: (
+        pool.free_block_queue.popleft(),
+        "fifo",
+    )
+    pool.eviction_policy = policy
+
+    assert pool.get_new_blocks(1) == [block]
+    assert pool.take_eviction_counts() == {"fifo": 1}
 
 
 def test_unknown_policy_fails_before_experiment(monkeypatch) -> None:
@@ -189,6 +210,8 @@ def test_over_quota_uses_application_local_lru(monkeypatch) -> None:
     assert agent_old.block_hash is None
     assert agent_old.owner is None
     assert pool.get_new_blocks(1) == [agent_mid]
+    assert pool.take_eviction_counts() == {"quotaserve": 2}
+    assert pool.take_eviction_counts() == {}
 
 
 def test_inactive_and_global_lru_fallback(monkeypatch) -> None:
@@ -205,10 +228,12 @@ def test_inactive_and_global_lru_fallback(monkeypatch) -> None:
     controller.observe("active", 100, 0, 0, now=now - 1.5)
     controller.tick(now=now - 0.5)
     assert pool.get_new_blocks(1) == [old]
+    assert pool.take_eviction_counts() == {"quotaserve": 1}
 
     controller.signals.clear()
     controller.tick(now=now + 0.5)
     assert pool.get_new_blocks(1) == [new]
+    assert pool.take_eviction_counts() == {"lru": 1}
 
 
 def test_touch_and_external_eviction_update_free_indexes(monkeypatch) -> None:
@@ -222,6 +247,7 @@ def test_touch_and_external_eviction_update_free_indexes(monkeypatch) -> None:
     assert pool.get_num_free_blocks() == 0
     pool.free_blocks([block])
     pool.evict_blocks({block.block_id})
+    assert pool.take_eviction_counts() == {}
     assert block.block_hash is None
     assert block.owner is None
     assert pool.get_new_blocks(1) == [block]

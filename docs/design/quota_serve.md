@@ -8,7 +8,7 @@ QuotaServe는 새 요청에 블록을 할당할 때 **캐시된 free block을 �
 
 `BlockPool`은 블록 할당과 cache hash 관리의 소유자다. `EVICTION_POLICY=lru`이면 기존 free queue의 LRU 순서로 블록을 꺼낸다. 기본값도 `lru`다. `EVICTION_POLICY=quotaserve`이면 `BlockPool`에 `QuotaServeAdapter`를 연결하고, 블록을 꺼낼 때 어댑터가 대상을 선택한다. 알 수 없는 값은 `BlockPool` 생성 시 오류가 난다. QuotaServe에는 prefix caching이 필요하다.
 
-정책 생성은 [`eviction_policy.py`](../../vllm/v1/core/eviction_policy.py)에 모았다. 여기의 `BlockEvictionPolicy`는 정책이 받아야 하는 블록 상태 변경 hook을 정의하는 `Protocol`이다. `QuotaServeAdapter`가 이 메서드들을 제공하며, `QuotaServeController`는 어댑터 내부에서 목표 비율을 계산한다. 부모 클래스를 상속해 override하는 구조는 아니다. LRU는 어댑터를 만들지 않고 기존 경로를 그대로 사용한다. 덕분에 비교 실험의 LRU 조건은 추가 인덱스를 유지하거나 QuotaServe 타이머를 실행하지 않는다. 향후 FIFO·UniCache를 넣으려면 같은 계약을 구현하고 정책 선택 지점에 등록해야 한다. **현재 구현된 값은 `lru`와 `quotaserve`뿐이다.**
+정책 생성은 [`eviction_policy.py`](../../vllm/v1/core/eviction_policy.py)에 모았다. 여기의 `BlockEvictionPolicy`는 정책이 받아야 하는 블록 상태 변경 hook을 정의하는 `Protocol`이다. `QuotaServeAdapter`가 이 메서드들을 제공하며, `QuotaServeController`는 어댑터 내부에서 목표 비율을 계산한다. 부모 클래스를 상속해 override하는 구조는 아니다. LRU는 어댑터를 만들지 않고 기존 경로를 그대로 사용한다. 덕분에 비교 실험의 LRU 조건은 추가 인덱스를 유지하거나 QuotaServe 타이머를 실행하지 않는다. 향후 FIFO·UniCache를 넣으려면 같은 계약을 구현하고 `_POLICY_ADAPTERS`에 등록한다. `take_free_block()`은 선택한 블록과 선택 경로 이름을 반환하며, 이 이름은 별도 통계 코드 변경 없이 `/metrics`의 `selection` 라벨이 된다. **현재 구현된 값은 `lru`와 `quotaserve`뿐이다.**
 
 ### 요청 간 흐름 (`EVICTION_POLICY=quotaserve`)
 
@@ -116,13 +116,16 @@ Active 앱 사이에서 EWMA demand를 정규화한 **수요 비중**과, `EWMA 
 
 `on_reset`은 블록 목록을 초기화하지만 컨트롤러의 EWMA 상태는 유지한다. 비교 실험에서 정책을 바꿀 때 서버를 재시작하는 이유 중 하나다.
 
+### 회수 횟수 관측
+
+`BlockPool`은 새 블록을 할당하면서 cached block의 hash를 실제로 제거한 경우만 센다. 선택 경로는 `vllm:kv_cache_evictions_total`의 `selection` 라벨로 기록한다. 기본 LRU 또는 QuotaServe의 global LRU fallback은 `lru`, inactive·over-quota 규칙은 `quotaserve`다. 다른 정책을 추가하면 어댑터가 반환한 선택 이름이 같은 라벨에 기록된다. uncached free block 재사용과 외부 KV connector의 강제 삭제는 이 카운터에 포함되지 않는다. 카운터는 기본적으로 `/metrics`에 노출되며, 002의 `run.sh`가 실행 종료 후 `summary.json`에 저장한다. 서버를 재사용하면 `/metrics` 값은 이전 실행까지 포함한다.
+
 ## 5. 검증과 범위
 
 [`test_quota_serve.py`](../../tests/v1/core/test_quota_serve.py)는 기본 LRU 선택, 잘못된 정책 값, 앱별 salt·owner, 1초 갱신과 감쇠, uncached block 우선, 초과 앱의 local LRU, inactive 회수, global LRU fallback, 외부 eviction·reset 뒤 인덱스 정합성을 검사한다.
 
 ```bash
-uv run --no-sync --python .venv/bin/python python -m pytest \
-  tests/v1/core/test_quota_serve.py -q
+.venv/bin/python -m pytest tests/v1/core/test_quota_serve.py -q
 ```
 
 현재 구현은 `application_id`가 있는 요청만 앱별 수요에 반영한다. ID가 없는 요청의 cached block은 owner가 없으므로 유효한 quota가 있을 때 inactive 후보가 될 수 있다. 다중 테넌트 서비스에서는 인증된 gateway가 `application_id`를 지정해야 한다. 실험에서는 두 정책을 같은 워크로드로 비교하고, 정책을 바꿀 때 서버를 재시작해 cache 상태를 초기화한다.

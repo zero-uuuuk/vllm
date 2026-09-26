@@ -231,11 +231,13 @@ class QuotaServeAdapter:
             self._order += 1
             self._free_order[block.block_id] = self._order
 
-    def take_free_block(self) -> KVCacheBlock:
+    def take_free_block(self) -> tuple[KVCacheBlock, str | None]:
         if self._free_uncached:
             block = next(iter(self._free_uncached.values()))
+            reason = None
         else:
             block = None
+            reason = "quotaserve"
             shares = self.controller.shares()
             if shares is not None:
                 # 1순위: 최근 요청이 없는 앱의 가장 오래된 캐시 블록.
@@ -271,7 +273,8 @@ class QuotaServeAdapter:
             if block is None:
                 # 유효한 quota나 초과 앱이 없으면 기존 global LRU 순서를 따른다.
                 block = self.free_block_queue.fake_free_list_head.next_free_block
+                reason = "lru"
             assert block is not None
         self._forget_free(block)
         self.free_block_queue.remove(block)
-        return block
+        return block, reason

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import logging
+import os
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -559,6 +560,15 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_prefix_cache_hits, per_engine_labelvalues
         )
 
+        self.counter_kv_cache_evictions = self._counter_cls(
+            name="vllm:kv_cache_evictions",
+            documentation="Cached blocks reclaimed by eviction selection strategy.",
+            labelnames=[*labelnames, "selection"],
+        )
+        for labelvalues in per_engine_labelvalues.values():
+            for selection in {"lru", os.getenv("EVICTION_POLICY", "lru")}:
+                self.counter_kv_cache_evictions.labels(*labelvalues, selection).inc(0)
+
         #
         # External - KV connector prefix cache
         #
@@ -1086,6 +1096,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.counter_prefix_cache_hits[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.hits
             )
+            for selection, count in scheduler_stats.kv_cache_evictions.items():
+                self.counter_kv_cache_evictions.labels(
+                    *self.per_engine_labelvalues[engine_idx], selection
+                ).inc(count)
 
             if scheduler_stats.connector_prefix_cache_stats is not None:
                 self.counter_connector_prefix_cache_queries[engine_idx].inc(

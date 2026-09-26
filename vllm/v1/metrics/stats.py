@@ -184,6 +184,7 @@ class SchedulerStats:
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None
+    kv_cache_evictions: dict[str, int] = field(default_factory=dict)
 
     kv_cache_eviction_events: list[KVCacheEvictionEvent] = field(default_factory=list)
 

@@ -1962,6 +1962,7 @@ class Scheduler(SchedulerInterface):
             return None
         prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
         assert prefix_cache_stats is not None
+        eviction_counts = self.kv_cache_manager.block_pool.take_eviction_counts()
         connector_prefix_cache_stats: PrefixCacheStats | None = None
         if self.connector_prefix_cache_stats is not None:
             connector_prefix_cache_stats = self.connector_prefix_cache_stats
@@ -1981,6 +1982,7 @@ class Scheduler(SchedulerInterface):
             num_skipped_waiting_reqs=len(self.skipped_waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
+            kv_cache_evictions=eviction_counts,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,
             spec_decoding_stats=spec_stats,

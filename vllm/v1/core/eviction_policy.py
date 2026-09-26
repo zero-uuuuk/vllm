@@ -20,12 +20,15 @@ class BlockEvictionPolicy(Protocol):
     def start(self) -> None: ...
     def stop(self) -> None: ...
     def on_cached(self, block: KVCacheBlock, request: Request) -> None: ...
-    def take_free_block(self) -> KVCacheBlock: ...
+    def take_free_block(self) -> tuple[KVCacheBlock, str | None]: ...
     def on_evict(self, block: KVCacheBlock) -> None: ...
     def on_touch(self, block: KVCacheBlock) -> None: ...
     def on_free(self, block: KVCacheBlock) -> None: ...
     def on_reset(self) -> None: ...
     def observe_request(self, request: Request) -> None: ...
+
+
+_POLICY_ADAPTERS = {"quotaserve": QuotaServeAdapter}
 
 
 def create_block_eviction_policy(
@@ -34,11 +37,12 @@ def create_block_eviction_policy(
     enable_caching: bool,
 ) -> BlockEvictionPolicy | None:
     policy = os.getenv("EVICTION_POLICY", "lru")
-    if policy not in ("lru", "quotaserve"):
-        raise ValueError(f"Unknown EVICTION_POLICY: {policy}")
-    if policy == "quotaserve":
-        if not enable_caching:
-            raise ValueError("QuotaServe requires prefix caching")
-        return QuotaServeAdapter(blocks, free_block_queue)
     # LRU는 어댑터 없이 BlockPool의 기존 free queue 경로를 사용한다.
-    return None
+    if policy == "lru":
+        return None
+    adapter = _POLICY_ADAPTERS.get(policy)
+    if adapter is None:
+        raise ValueError(f"Unknown EVICTION_POLICY: {policy}")
+    if not enable_caching:
+        raise ValueError(f"{policy} requires prefix caching")
+    return adapter(blocks, free_block_queue)

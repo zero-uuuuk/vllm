@@ -90,15 +90,16 @@ def test_full_block_records_request_owner(monkeypatch) -> None:
 def test_quota_shares_and_decay() -> None:
     controller = QuotaServeController()
     controller.last_tick = 0
-    controller.observe("chat", 100, 0, 80, now=0.2)
+    controller.observe("chat", 100, 40, 80, now=0.2)
     controller.observe("agent", 100, 0, 20, now=0.3)
 
     assert controller.shares() is None
+    assert controller.pending == {"chat": [60, 80], "agent": [80, 20]}
     controller.tick(now=1.1)
     shares = controller.shares()
     assert shares is not None
-    assert shares["chat"] == pytest.approx(0.5)
-    assert shares["agent"] == pytest.approx(0.5)
+    assert shares["chat"] == pytest.approx(60 / 140)
+    assert shares["agent"] == pytest.approx(80 / 140)
 
     demand = controller.signals["chat"].demand
     controller.tick(now=2.1)

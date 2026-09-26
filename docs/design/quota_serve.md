@@ -79,15 +79,14 @@ QuotaServe가 점유량으로 세는 것은 **cache hash와 owner가 있고 `ref
 
 | 측정값 | 계산에 쓰는 의미 |
 | --- | --- |
-| input + output token 수 | 최근 token demand |
-| local cached input token 수 | prefix 재사용량 |
-| 전체 input token 수 | 재사용률의 분모 |
+| input − local cached input + output token 수 | 최근 계산 token demand |
+| local cached input token 수 | 캐시에서 재사용한 입력량 |
 
-컨트롤러의 `pending[app]`은 현재 1초 구간의 `[입력+출력, 내부 캐시 재사용 입력, 전체 입력]` 합계다. 예를 들어 `chat` 요청 두 건이 같은 구간에 완료되어 입력 150개, 출력 30개, 재사용 입력 60개였다면 `pending["chat"] = [180, 60, 150]`이 된다. 요청이 여러 구간에 걸쳐 실행되어도 토큰 수는 **완료된 구간**에 들어간다. 다음 갱신 때 합계를 token/초 rate로 바꾸고 `pending`을 비운다. 요청별 관측값을 별도로 저장하지는 않는다.
+컨트롤러의 `pending[app]`은 현재 1초 구간의 `[미캐시 입력+출력, 내부 캐시 재사용 입력]` 합계다. 예를 들어 `chat` 요청 두 건이 같은 구간에 완료되어 입력 150개, 출력 30개, 재사용 입력 60개였다면 `pending["chat"] = [120, 60]`이 된다. 요청이 여러 구간에 걸쳐 실행되어도 토큰 수는 **완료된 구간**에 들어간다. 다음 갱신 때 합계를 token/초 rate로 바꾸고 `pending`을 비운다. 요청별 관측값을 별도로 저장하지는 않는다.
 
-세 rate의 EWMA는 `signals[app]`에 남는다. half-life는 10초이며, 완료 요청이 없는 구간에는 0을 반영해 이전 값이 감소한다. 최근 30초 동안 완료된 요청이 없는 앱은 inactive다. 이 시간 기준을 별도로 두는 이유는 EWMA가 0에 가까워지는 동안 오래된 앱을 계속 active로 취급하지 않기 위해서다.
+두 rate의 EWMA는 `signals[app]`에 남는다. half-life는 10초이며, 완료 요청이 없는 구간에는 0을 반영해 이전 값이 감소한다. 최근 30초 동안 완료된 요청이 없는 앱은 inactive다. 이 시간 기준을 별도로 두는 이유는 EWMA가 0에 가까워지는 동안 오래된 앱을 계속 active로 취급하지 않기 위해서다.
 
-Active 앱 사이에서 EWMA demand를 정규화한 **수요 비중**과, `EWMA cached tokens / EWMA input tokens`를 다시 앱 사이에서 정규화한 **재사용 비중**을 구한다. 기본 재사용 가중치는 0이므로 목표 비율 $p_i(t)$는 수요 비중과 같다. 재사용 가중치를 높이면 두 비중을 결합한다. 모든 앱의 cache hit이 0이면 수요 비중만 사용한다. 유효한 수요가 없으면 목표 비율을 만들지 않고 global LRU를 사용한다.
+Active 앱 사이에서 EWMA 계산 token demand를 정규화해 목표 비율 $p_i(t)$를 구한다. Cached input token EWMA는 관측값으로 남지만 별도 재사용률 가중치는 적용하지 않는다. 유효한 수요가 없으면 목표 비율을 만들지 않고 global LRU를 사용한다.
 
 `QuotaServeController.start()`는 전용 스레드를 시작한다. 스레드는 약 1초마다 구간을 반영해 목표 비율을 갱신하고, `Scheduler.shutdown()`에서 종료된다. 요청 완료가 구간 경계를 먼저 지나면 `observe()`가 경과 구간을 반영한 뒤 새 요청을 현재 구간에 더한다. 스레드가 지연되면 경과한 구간을 한 번에 따라잡되, 중간의 빈 구간에는 0을 적용한다. 블록 할당 시에는 최근에 계산된 비율을 읽는다. 관측과 갱신은 컨트롤러의 lock으로 보호한다.
 

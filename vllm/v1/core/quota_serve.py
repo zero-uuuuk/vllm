@@ -20,7 +20,6 @@ class _Signals:
     # 1초 구간값을 반영한 EWMA 상태와 마지막 정상 완료 시각.
     demand: float = 0.0
     cached: float = 0.0
-    prompt: float = 0.0
     last_completed: float = float("-inf")
 
 
@@ -32,15 +31,13 @@ class QuotaServeController:
         interval: float = 1.0,
         half_life: float = 10.0,
         active_timeout: float = 30.0,
-        reuse_weight: float = 0.0,
     ) -> None:
         self.interval = interval
         self.active_timeout = active_timeout
-        self.reuse_weight = reuse_weight
         self.decay = 2 ** (-interval / half_life)
         self.last_tick = time.monotonic()
         self.signals: dict[str, _Signals] = {}
-        # 앱별 현재 구간 합계: [입력+출력, 내부 캐시 재사용 입력, 전체 입력].
+        # 앱별 현재 구간 합계: [미캐시 입력+출력, 내부 캐시 재사용 입력].
         self.pending: dict[str, list[int]] = {}
         # 최근 갱신에서 계산한 soft quota 비율. 유효한 수요가 없으면 None.
         self._shares: dict[str, float] | None = None
@@ -75,7 +72,7 @@ class QuotaServeController:
         if steps <= 0:
             return False
         for app, signals in self.signals.items():
-            pending = self.pending.get(app, [0, 0, 0])
+            pending = self.pending.get(app, [0, 0])
             # 밀린 첫 구간에 pending을 반영하고, 나머지 빈 구간만큼 0으로 감쇠한다.
             factor = self.decay ** (steps - 1)
             signals.demand = factor * (
@@ -85,10 +82,6 @@ class QuotaServeController:
             signals.cached = factor * (
                 self.decay * signals.cached
                 + (1 - self.decay) * pending[1] / self.interval
-            )
-            signals.prompt = factor * (
-                self.decay * signals.prompt
-                + (1 - self.decay) * pending[2] / self.interval
             )
         self.pending.clear()
         self.last_tick += steps * self.interval
@@ -117,10 +110,10 @@ class QuotaServeController:
             self._refresh(now)
             signals = self.signals.setdefault(app, _Signals())
             signals.last_completed = now
-            pending = self.pending.setdefault(app, [0, 0, 0])
-            pending[0] += prompt_tokens + output_tokens
-            pending[1] += min(cached_tokens, prompt_tokens)
-            pending[2] += prompt_tokens
+            pending = self.pending.setdefault(app, [0, 0])
+            cached_input = min(cached_tokens, prompt_tokens)
+            pending[0] += prompt_tokens - cached_input + output_tokens
+            pending[1] += cached_input
 
     def shares(self) -> dict[str, float] | None:
         with self._lock:
@@ -137,17 +130,8 @@ class QuotaServeController:
         if demand_total <= 0:
             return None
 
-        reuse = {
-            app: signal.cached / (signal.prompt + 1e-9)
-            for app, signal in active.items()
-        }
-        reuse_total = sum(reuse.values())
-        if reuse_total <= 0:
-            return {app: signal.demand / demand_total for app, signal in active.items()}
-        # 수요 비중과 앱별 재사용률의 비중을 결합해 soft quota를 만든다.
         return {
-            app: (1 - self.reuse_weight) * signal.demand / demand_total
-            + self.reuse_weight * reuse[app] / reuse_total
+            app: signal.demand / demand_total
             for app, signal in active.items()
         }
 

@@ -97,8 +97,8 @@ def test_quota_shares_and_decay() -> None:
     controller.tick(now=1.1)
     shares = controller.shares()
     assert shares is not None
-    assert shares["chat"] == pytest.approx(0.56)
-    assert shares["agent"] == pytest.approx(0.44)
+    assert shares["chat"] == pytest.approx(0.5)
+    assert shares["agent"] == pytest.approx(0.5)
 
     demand = controller.signals["chat"].demand
     controller.tick(now=2.1)

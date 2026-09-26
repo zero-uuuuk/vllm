@@ -32,7 +32,7 @@ class QuotaServeController:
         interval: float = 1.0,
         half_life: float = 10.0,
         active_timeout: float = 30.0,
-        reuse_weight: float = 0.2,
+        reuse_weight: float = 0.0,
     ) -> None:
         self.interval = interval
         self.active_timeout = active_timeout

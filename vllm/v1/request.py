@@ -2,6 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
+import hashlib
+import hmac
+import json
+import secrets
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -27,6 +31,10 @@ from vllm.v1.utils import ConstantList
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.v1.core.kv_cache_utils import BlockHash
+
+
+# 같은 프로세스에서 앱별 cache_salt를 안정적으로 유도할 비밀 키.
+_APPLICATION_CACHE_SALT_KEY = secrets.token_bytes(32)
 
 
 @dataclass
@@ -138,7 +146,26 @@ class Request:
 
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
+        # ############ Application Identity ############
+        # API의 vllm_xargs가 sampling_params.extra_args로 전달된다.
+        extra_args = sampling_params.extra_args if sampling_params else None
+        application_id = extra_args.get("application_id") if extra_args else None
+        self.application_id: str | None = (
+            application_id
+            if isinstance(application_id, str) and application_id
+            else None
+        )
         self.cache_salt: str | None = cache_salt
+        if self.application_id is not None:
+            # 앱 ID와 선택적 클라이언트 salt를 함께 서명해 앱별 캐시 키를 분리한다.
+            salt_input = json.dumps(
+                [self.application_id, cache_salt], ensure_ascii=False
+            ).encode("utf-8")
+            self.cache_salt = hmac.new(
+                _APPLICATION_CACHE_SALT_KEY, salt_input, hashlib.sha256
+            ).hexdigest()
+        # 첫 prefill의 내부 prefix-cache 재사용량을 스케줄러가 기록한다.
+        self.quota_cached_tokens = 0
 
         # Multi-modal related
         self.mm_features = mm_features or []

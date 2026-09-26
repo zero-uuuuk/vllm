@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""BlockPool의 기존 global LRU 선택을 대체할 정책 어댑터의 연결점."""
+
+from __future__ import annotations
+
+import os
+from typing import TYPE_CHECKING, Protocol
+
+from vllm.v1.core.quota_serve import QuotaServeAdapter
+
+if TYPE_CHECKING:
+    from vllm.v1.core.kv_cache_utils import FreeKVCacheBlockQueue, KVCacheBlock
+    from vllm.v1.request import Request
+
+
+class BlockEvictionPolicy(Protocol):
+    """정책이 구현할 블록 상태 변경 hook. 명시적 상속은 필요하지 않다."""
+
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+    def on_cached(self, block: KVCacheBlock, request: Request) -> None: ...
+    def take_free_block(self) -> KVCacheBlock: ...
+    def on_evict(self, block: KVCacheBlock) -> None: ...
+    def on_touch(self, block: KVCacheBlock) -> None: ...
+    def on_free(self, block: KVCacheBlock) -> None: ...
+    def on_reset(self) -> None: ...
+    def observe_request(self, request: Request) -> None: ...
+
+
+def create_block_eviction_policy(
+    blocks: list[KVCacheBlock],
+    free_block_queue: FreeKVCacheBlockQueue,
+    enable_caching: bool,
+) -> BlockEvictionPolicy | None:
+    policy = os.getenv("EVICTION_POLICY", "lru")
+    if policy not in ("lru", "quotaserve"):
+        raise ValueError(f"Unknown EVICTION_POLICY: {policy}")
+    if policy == "quotaserve":
+        if not enable_caching:
+            raise ValueError("QuotaServe requires prefix caching")
+        return QuotaServeAdapter(blocks, free_block_queue)
+    # LRU는 어댑터 없이 BlockPool의 기존 free queue 경로를 사용한다.
+    return None

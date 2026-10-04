@@ -69,10 +69,7 @@ MODELS = [
         attn_type="decoder",
         is_prefix_caching_supported=True,
         is_chunked_prefill_supported=True,
-        # Skip: model's custom tokenizer on HF hub is incompatible with
-        # transformers v5 (sets attrs before super().__init__, triggering
-        # AttributeError on 'verbose' in __getattr__).
-        enable_test=False,
+        enable_test=True,
     ),
 ]
 

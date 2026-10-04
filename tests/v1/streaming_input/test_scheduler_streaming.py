@@ -76,7 +76,6 @@ def create_scheduler() -> Scheduler:
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=16,
-        hash_block_size=16,
     )
 
 

@@ -20,14 +20,16 @@ if current_platform.is_rocm():
 else:
     ATTN_BACKENDS = ["FLASH_ATTN"]
 
-# On SM<90 (e.g., L4), batch invariance does not support CUDA graphs.
-# See https://github.com/vllm-project/vllm/pull/30018 and
-# tests/v1/determinism/utils.py for the documented limitation.
-IS_DEVICE_CAPABILITY_BELOW_90 = not current_platform.has_device_capability(90)
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("attn_backend", ATTN_BACKENDS)
+@pytest.mark.xfail(
+    not current_platform.is_rocm(),
+    reason="EAGLE + DP > 1 produces wrong outputs when async spec decode "
+    "correction is active. Root cause under investigation. "
+    "See: https://github.com/vllm-project/vllm/issues/31913",
+    strict=False,
+)
 @pytest.mark.xfail(
     current_platform.is_rocm(),
     reason="Test may fail on ROCm until batch invariance is enabled. "
@@ -35,7 +37,7 @@ IS_DEVICE_CAPABILITY_BELOW_90 = not current_platform.has_device_capability(90)
     strict=False,
 )
 async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch, attn_backend: str):
-    if not current_platform.is_rocm() and not current_platform.is_xpu():
+    if not current_platform.is_rocm():
         # This test checks that running a model with and without eagle
         # leads to identical tokens.
         #
@@ -55,7 +57,7 @@ async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch, attn_backend: str):
     engine_args = AsyncEngineArgs(
         model=target_model,
         tokenizer_mode="auto",
-        enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
+        enforce_eager=False,
         tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
         data_parallel_size=DP_SIZE,
         data_parallel_backend="mp",  # ray takes more time

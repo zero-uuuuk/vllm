@@ -77,8 +77,7 @@ __global__ void rms_norm_kernel(
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; j++) {
       float x = static_cast<float>(src1.val[j]);
-      float w = static_cast<float>(src2.val[j]);
-      dst.val[j] = static_cast<scalar_t>(x * s_variance * w);
+      dst.val[j] = ((scalar_t)(x * s_variance)) * src2.val[j];
     }
     v_out[i] = dst;
   }
@@ -135,17 +134,10 @@ fused_add_rms_norm_kernel(
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
     int id = blockIdx.x * vec_hidden_size + idx;
     int64_t strided_id = blockIdx.x * vec_input_stride + idx;
-    _f16Vec<scalar_t, width> res = residual_v[id];
-    _f16Vec<scalar_t, width> w = weight_v[idx];
-    _f16Vec<scalar_t, width> out;
-    using Converter = _typeConvert<scalar_t>;
-#pragma unroll
-    for (int j = 0; j < width; ++j) {
-      float x = Converter::convert(res.data[j]);
-      float wf = Converter::convert(w.data[j]);
-      out.data[j] = Converter::convert(x * s_variance * wf);
-    }
-    input_v[strided_id] = out;
+    _f16Vec<scalar_t, width> temp = residual_v[id];
+    temp *= s_variance;
+    temp *= weight_v[idx];
+    input_v[strided_id] = temp;
   }
 }
 
@@ -182,8 +174,8 @@ fused_add_rms_norm_kernel(
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float x = (float)residual[blockIdx.x * hidden_size + idx];
-    float w = (float)weight[idx];
-    input[blockIdx.x * input_stride + idx] = (scalar_t)(x * s_variance * w);
+    input[blockIdx.x * input_stride + idx] =
+        ((scalar_t)(x * s_variance)) * weight[idx];
   }
 }
 

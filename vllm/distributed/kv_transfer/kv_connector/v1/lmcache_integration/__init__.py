@@ -7,7 +7,6 @@ from .multi_process_adapter import (
     LMCacheMPSchedulerAdapter,
     LMCacheMPWorkerAdapter,
     LoadStoreOp,
-    ParallelStrategy,
 )
 
 __all__ = [
@@ -16,5 +15,4 @@ __all__ = [
     "LMCacheMPSchedulerAdapter",
     "LMCacheMPWorkerAdapter",
     "LoadStoreOp",
-    "ParallelStrategy",
 ]

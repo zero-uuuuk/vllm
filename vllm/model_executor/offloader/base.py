@@ -10,26 +10,12 @@ from typing import TYPE_CHECKING
 
 import torch.nn as nn
 
-import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils.platform_utils import is_pin_memory_available
 
 if TYPE_CHECKING:
     from vllm.config import OffloadConfig
 
 logger = init_logger(__name__)
-
-
-def should_pin_memory() -> bool:
-    """Check if pinned memory should be used for weight offloading.
-
-    Combines the platform capability check with the user override env var.
-    On unified-memory systems (e.g. GH200) pinned memory eats into GPU
-    memory, so users can disable it via VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY.
-    """
-    return (
-        is_pin_memory_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY
-    )
 
 
 """
@@ -118,9 +104,11 @@ def set_offloader(instance: BaseOffloader) -> None:
     global _instance
     _instance = instance
     if isinstance(instance, NoopOffloader):
-        logger.debug_once("Offloader set to NoopOffloader (no offloading).")
+        logger.debug_once(
+            "Offloader set to NoopOffloader (no offloading).", scope="local"
+        )
     else:
-        logger.info_once("Offloader set to %s", type(instance).__name__)
+        logger.info_once("Offloader set to %s", type(instance).__name__, scope="local")
 
 
 def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:

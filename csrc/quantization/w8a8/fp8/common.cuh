@@ -1,7 +1,7 @@
 #pragma once
 
 #include "libtorch_stable/quantization/vectorization.cuh"
-#include "../../utils.cuh"
+#include "quantization/utils.cuh"
 
 #include <cmath>
 

@@ -94,15 +94,7 @@ def init_on_device_without_buffers(device: torch.device):
             setattr(torch, torch_function_name, old_torch_function)
 
 
-Style = Literal[
-    "colwise",
-    "rowwise",
-    "replicate",
-    "colwise_gather_output",
-    "rowwise_split_input",
-    "colwise_rep",
-    "rowwise_rep",
-]
+Style = Literal["colwise", "colwise_rep", "rowwise", "rowwise_rep", "replicate"]
 
 
 def replace_linear_class(
@@ -128,14 +120,10 @@ def replace_linear_class(
 
     vllm_linear_cls, vllm_linear_kwargs = {
         "colwise": (ColumnParallelLinear, {}),
-        "rowwise": (RowParallelLinear, {}),
-        "replicate": (ReplicatedLinear, {}),
-        # Transformers v5
-        "colwise_gather_output": (ColumnParallelLinear, {"gather_output": True}),
-        "rowwise_split_input": (RowParallelLinear, {"input_is_parallel": False}),
-        # Transformers v4
         "colwise_rep": (ColumnParallelLinear, {"gather_output": True}),
+        "rowwise": (RowParallelLinear, {}),
         "rowwise_rep": (RowParallelLinear, {"input_is_parallel": False}),
+        "replicate": (ReplicatedLinear, {}),
     }.get(style, (ReplicatedLinear, {}))
 
     return vllm_linear_cls(

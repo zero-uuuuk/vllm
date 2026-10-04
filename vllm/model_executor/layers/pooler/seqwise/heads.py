@@ -103,16 +103,14 @@ class ClassifierPoolerHead(SequencePoolerHead):
     def __init__(
         self,
         classifier: ClassifierFn | None = None,
-        logit_mean: float | None = None,
-        logit_sigma: float | None = None,
+        logit_bias: float | None = None,
         head_dtype: torch.dtype | str | None = None,
         activation: ActivationFn | None = None,
     ) -> None:
         super().__init__()
 
         self.classifier = classifier
-        self.logit_mean = logit_mean
-        self.logit_sigma = logit_sigma
+        self.logit_bias = logit_bias
         self.head_dtype = head_dtype
         self.activation = activation
 
@@ -140,11 +138,8 @@ class ClassifierPoolerHead(SequencePoolerHead):
             logits = pooled_data
 
         # logits shape: [batchsize, num_labels]
-        # Affine score calibration: activation((logit - mean) / sigma)
-        if self.logit_mean is not None:
-            logits = logits - self.logit_mean
-        if self.logit_sigma is not None:
-            logits = logits / self.logit_sigma
+        if self.logit_bias is not None:
+            logits -= self.logit_bias
 
         if self.activation is not None:
             flags = [p.use_activation for p in pooling_params]

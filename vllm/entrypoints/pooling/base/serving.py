@@ -1,19 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Mapping
-from concurrent.futures import Executor
 from http import HTTPStatus
 from typing import ClassVar
 
-import torch
 from fastapi import Request
 from fastapi.responses import Response
 from starlette.datastructures import Headers
 
 from vllm import PoolingParams, PoolingRequestOutput, envs
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateConfig,
@@ -22,6 +18,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.pooling.typing import AnyPoolingRequest, PoolingServeContext
 from vllm.exceptions import VLLMNotFoundError
 from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
@@ -33,13 +30,12 @@ from vllm.tracing import (
     log_tracing_disabled_warning,
 )
 from vllm.utils import random_uuid
-from vllm.utils.async_utils import make_async, merge_async_iterators
+from vllm.utils.async_utils import merge_async_iterators
 
-from ..typing import AnyPoolingRequest, PoolingServeContext
 from .io_processor import PoolingIOProcessor
 
 
-class PoolingServingBase(ABC):
+class PoolingServing:
     request_id_prefix: ClassVar[str]
 
     def __init__(
@@ -54,11 +50,10 @@ class PoolingServingBase(ABC):
         return_tokens_as_token_ids: bool = False,
         log_error_stack: bool = False,
     ):
+        super().__init__()
         self.engine_client = engine_client
         self.models = models
         self.model_config = models.model_config
-        self.renderer = models.renderer
-        self.vllm_config = engine_client.vllm_config
         self.max_model_len = self.model_config.max_model_len
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
@@ -68,48 +63,34 @@ class PoolingServingBase(ABC):
             chat_template_content_format=chat_template_content_format,
             trust_request_chat_template=trust_request_chat_template,
         )
+        self.io_processor = self.init_io_processor(
+            model_config=models.model_config,
+            renderer=models.renderer,
+            chat_template_config=self.chat_template_config,
+        )
 
-        # Shared thread pool executor for preprocessing and postprocessing.
-        self._executor: Executor = models.renderer._executor
-        self._preprocessing_async = make_async(
-            self._preprocessing, executor=self._executor
-        )
-        self._postprocessing_async = make_async(
-            self._postprocessing, executor=self._executor
-        )
+    def init_io_processor(
+        self,
+        model_config: ModelConfig,
+        renderer: BaseRenderer,
+        chat_template_config: ChatTemplateConfig,
+    ) -> PoolingIOProcessor:
+        raise NotImplementedError
 
     async def __call__(
         self,
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ) -> Response:
-        io_processor = self.get_io_processor(request)
-        ctx = await self._init_ctx(io_processor, request, raw_request)
-        await self._preprocessing_async(io_processor, ctx)
+        ctx = await self._init_ctx(request, raw_request)
+        await self.io_processor.pre_process_online_async(ctx)
         await self._prepare_generators(ctx)
         await self._collect_batch(ctx)
-        return await self._postprocessing_async(io_processor, ctx)
-
-    @abstractmethod
-    def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
-        raise NotImplementedError
-
-    @torch.inference_mode()
-    def _preprocessing(
-        self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
-    ):
-        return io_processor.pre_process_online(ctx)
-
-    @torch.inference_mode()
-    def _postprocessing(
-        self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
-    ):
-        io_processor.post_process_online(ctx)
-        return self._build_response(ctx)
+        await self.io_processor.post_process_online_async(ctx)
+        return await self._build_response(ctx)
 
     async def _init_ctx(
         self,
-        io_processor: PoolingIOProcessor,
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ):
@@ -117,12 +98,10 @@ class PoolingServingBase(ABC):
         request_id = f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
         await self._check_model(request)
 
-        pooling_params = io_processor.create_pooling_params(request)
         ctx = PoolingServeContext(
             request=request,
             raw_request=raw_request,
             model_name=model_name,
-            pooling_params=pooling_params,
             request_id=request_id,
         )
 
@@ -145,8 +124,10 @@ class PoolingServingBase(ABC):
             else await self._get_trace_headers(ctx.raw_request.headers)
         )
 
-        assert ctx.pooling_params is not None
-        pooling_params = ctx.pooling_params
+        if ctx.pooling_params is None:
+            pooling_params = self.io_processor.create_pooling_params(ctx.request)
+        else:
+            pooling_params = ctx.pooling_params
 
         if isinstance(pooling_params, list):
             for params in pooling_params:
@@ -209,8 +190,7 @@ class PoolingServingBase(ABC):
 
         ctx.final_res_batch = [res for res in final_res_batch if res is not None]
 
-    @abstractmethod
-    def _build_response(
+    async def _build_response(
         self,
         ctx: PoolingServeContext,
     ) -> Response:
@@ -267,7 +247,6 @@ class PoolingServingBase(ABC):
                 "greater than max_model_len."
                 " Please request a smaller truncation size."
             )
-
         return None
 
     async def _get_trace_headers(
@@ -376,26 +355,3 @@ class PoolingServingBase(ABC):
             params=params,
             lora_request=lora_request,
         )
-
-
-class PoolingServing(PoolingServingBase, ABC):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        self.io_processor = self.init_io_processor(
-            vllm_config=self.vllm_config,
-            renderer=self.renderer,
-            chat_template_config=self.chat_template_config,
-        )
-
-    @abstractmethod
-    def init_io_processor(
-        self,
-        vllm_config: VllmConfig,
-        renderer: BaseRenderer,
-        chat_template_config: ChatTemplateConfig,
-    ) -> PoolingIOProcessor:
-        raise NotImplementedError
-
-    def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
-        return self.io_processor

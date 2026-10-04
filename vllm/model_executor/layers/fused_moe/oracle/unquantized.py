@@ -121,7 +121,7 @@ def backend_to_kernel_cls(
         return BatchedTritonExperts
 
     elif backend == UnquantizedMoeBackend.XPU:
-        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExperts
+        from vllm.model_executor.layers.fused_moe.xpu_fused_moe import XPUExperts
 
         return XPUExperts
 
@@ -162,11 +162,6 @@ def select_unquantized_moe_backend(
 
     if current_platform.is_out_of_tree():
         return UnquantizedMoeBackend.OOT, None
-
-    if moe_config.is_lora_enabled:
-        return UnquantizedMoeBackend.TRITON, backend_to_kernel_cls(
-            UnquantizedMoeBackend.TRITON
-        )
 
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = _get_priority_backends(moe_config)
@@ -210,7 +205,7 @@ def select_unquantized_moe_backend(
             k_cls, config, None, None, activation_format
         )
         if supported:
-            logger.info_once(_make_log_backend(backend))
+            logger.info_once(_make_log_backend(backend), scope="local")
             return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
@@ -258,10 +253,12 @@ def select_unquantized_moe_backend(
                     k_cls, moe_config, None, None, activation_format
                 )
                 if supported:
-                    logger.info_once(_make_log_backend(backend))
+                    logger.info_once(_make_log_backend(backend), scope="local")
                     return backend, k_cls
                 else:
-                    logger.debug_once(_make_log_unsupported(backend, reason))
+                    logger.debug_once(
+                        _make_log_unsupported(backend, reason), scope="local"
+                    )
 
             raise NotImplementedError(
                 "Found VLLM_USE_FLASHINFER_MOE_FP16=1, but no "
@@ -283,10 +280,10 @@ def select_unquantized_moe_backend(
             k_cls, moe_config, None, None, activation_format
         )
         if supported:
-            logger.info_once(_make_log_backend(backend))
+            logger.info_once(_make_log_backend(backend), scope="local")
             return backend, k_cls
 
-        logger.debug_once(_make_log_unsupported(backend, reason))
+        logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
 
     raise NotImplementedError(
         "No Unquantized MoE backend supports the deployment configuration."
@@ -340,7 +337,7 @@ def make_unquantized_moe_kernel(
     )
     assert prepare_finalize is not None
 
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
+    logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
 
     # Create Experts
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:

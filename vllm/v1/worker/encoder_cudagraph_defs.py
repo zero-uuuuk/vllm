@@ -20,10 +20,8 @@ class EncoderCudaGraphConfig:
     modalities: list[str]
     """Supported modalities (e.g. ["image"])."""
 
-    input_key_by_modality: dict[str, str]
-    """Per-modality input tensor key mapping, e.g.
-    {"image": "pixel_values", "video": "pixel_values_videos"}.
-    """
+    input_key: str
+    """Key in mm_kwargs for the input tensor (e.g. "pixel_values")."""
 
     buffer_keys: list[str]
     """Keys for the tensor buffers recorded into the CUDA graph.

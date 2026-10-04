@@ -157,10 +157,6 @@ def _is_non_tekken_mistral(tokenizer: TokenizerLike) -> bool:
     return is_mistral_tokenizer(tokenizer) and not tokenizer.is_tekken
 
 
-def _get_llg_tokenizer(tokenizer: TokenizerLike) -> Any:
-    return tokenizer.llg_tokenizer if is_mistral_tokenizer(tokenizer) else None
-
-
 class SamplingParams(
     PydanticMsgspecMixin,
     msgspec.Struct,
@@ -820,10 +816,7 @@ class SamplingParams(
             # allows <|special_token|> and similar, see
             # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
             # Without tokenizer these are disallowed in grammars.
-            validate_guidance_grammar(
-                self,
-                tokenizer=_get_llg_tokenizer(tokenizer),
-            )
+            validate_guidance_grammar(self, tokenizer=None)
         elif backend == "outlines":
             # outlines backend
             validate_structured_output_request_outlines(self)
@@ -869,10 +862,7 @@ class SamplingParams(
                     self.structured_outputs._backend = "outlines"
                 else:
                     # Fall back to guidance by default.
-                    validate_guidance_grammar(
-                        self,
-                        tokenizer=_get_llg_tokenizer(tokenizer),
-                    )
+                    validate_guidance_grammar(self, tokenizer=None)
                     self.structured_outputs._backend = "guidance"
             # Remember that this backend was set automatically
             self.structured_outputs._backend_was_auto = True

@@ -145,10 +145,7 @@ class ExtractHiddenStatesProposer:
 
         # Return the sampled tokens as "draft" tokens
         # Shape: [batch_size, 1] to match num_speculative_tokens=1
-        # On decode steps with spec tokens, sampled_token_ids may have
-        # shape [batch_size, 2] (target + spec verification); slice to
-        # return only the target-sampled column.
-        return sampled_token_ids[:, :1]
+        return sampled_token_ids
 
     def _get_slot_mapping(
         self,

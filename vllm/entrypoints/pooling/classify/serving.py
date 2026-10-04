@@ -6,12 +6,15 @@ from typing import TypeAlias
 import numpy as np
 from fastapi.responses import JSONResponse
 
+from vllm.config import ModelConfig
+from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
+from vllm.entrypoints.pooling.base.serving import PoolingServing
+from vllm.entrypoints.pooling.typing import PoolingServeContext
 from vllm.logger import init_logger
 from vllm.outputs import ClassificationOutput
+from vllm.renderers import BaseRenderer
 
-from ..base.serving import PoolingServing
-from ..typing import PoolingServeContext
 from .io_processor import ClassifyIOProcessor
 from .protocol import (
     ClassificationData,
@@ -28,10 +31,19 @@ ClassificationServeContext: TypeAlias = PoolingServeContext[ClassificationReques
 class ServingClassification(PoolingServing):
     request_id_prefix = "classify"
 
-    def init_io_processor(self, *args, **kwargs) -> ClassifyIOProcessor:
-        return ClassifyIOProcessor(*args, **kwargs)
+    def init_io_processor(
+        self,
+        model_config: ModelConfig,
+        renderer: BaseRenderer,
+        chat_template_config: ChatTemplateConfig,
+    ) -> ClassifyIOProcessor:
+        return ClassifyIOProcessor(
+            model_config=model_config,
+            renderer=renderer,
+            chat_template_config=chat_template_config,
+        )
 
-    def _build_response(
+    async def _build_response(
         self,
         ctx: ClassificationServeContext,
     ) -> JSONResponse:

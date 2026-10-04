@@ -27,12 +27,7 @@ from vllm.assets.audio import AudioAsset
 
 
 def sync_openai(
-    audio_path: str,
-    client: OpenAI,
-    model: str,
-    *,
-    repetition_penalty: float = 1.3,
-    hotwords: str = None,
+    audio_path: str, client: OpenAI, model: str, *, repetition_penalty: float = 1.3
 ):
     """
     Perform synchronous transcription using OpenAI-compatible API.
@@ -48,15 +43,12 @@ def sync_openai(
             extra_body=dict(
                 seed=4419,
                 repetition_penalty=repetition_penalty,
-                hotwords=hotwords,
             ),
         )
         print("transcription result [sync]:", transcription.text)
 
 
-async def stream_openai_response(
-    audio_path: str, client: AsyncOpenAI, model: str, hotwords: str = None
-):
+async def stream_openai_response(audio_path: str, client: AsyncOpenAI, model: str):
     """
     Perform asynchronous transcription using OpenAI-compatible API.
     """
@@ -72,7 +64,6 @@ async def stream_openai_response(
             extra_body=dict(
                 seed=420,
                 top_p=0.6,
-                hotwords=hotwords,
             ),
             stream=True,
         )
@@ -145,7 +136,6 @@ def main(args):
         client=client,
         model=model,
         repetition_penalty=args.repetition_penalty,
-        hotwords=args.hotwords,
     )
 
     # Run the asynchronous function
@@ -156,10 +146,7 @@ def main(args):
         )
         asyncio.run(
             stream_openai_response(
-                args.audio_path if args.audio_path else winning_call,
-                client,
-                model,
-                hotwords=args.hotwords,
+                args.audio_path if args.audio_path else winning_call, client, model
             )
         )
     else:
@@ -186,12 +173,6 @@ if __name__ == "__main__":
         type=float,
         default=1.3,
         help="repetition penalty",
-    )
-    parser.add_argument(
-        "--hotwords",
-        type=str,
-        default=None,
-        help="hotwords",
     )
     args = parser.parse_args()
     main(args)

@@ -267,14 +267,6 @@ class OpenAIServingResponses(OpenAIServing):
 
         self.tool_server = tool_server
 
-    def _effective_chat_template_kwargs(
-        self, request: ResponsesRequest
-    ) -> dict[str, Any]:
-        return request.build_chat_params(
-            self.chat_template,
-            self.chat_template_content_format,
-        ).chat_template_kwargs
-
     def _validate_generator_input(
         self,
         engine_input: EngineInput,
@@ -472,14 +464,7 @@ class OpenAIServingResponses(OpenAIServing):
                     context = SimpleContext()
 
             if self.parser and self.parser.reasoning_parser_cls is not None:
-                chat_template_kwargs = self._effective_chat_template_kwargs(request)
-                reasoning_parser_kwargs = {
-                    "chat_template_kwargs": chat_template_kwargs,
-                }
-                reasoning_parser = self.parser.reasoning_parser_cls(
-                    tokenizer,
-                    chat_template_kwargs=chat_template_kwargs,
-                )
+                reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
                 if (
                     isinstance(
                         struct_out := sampling_params.structured_outputs,
@@ -501,9 +486,6 @@ class OpenAIServingResponses(OpenAIServing):
                 lora_request=lora_request,
                 priority=request.priority,
                 trace_headers=trace_headers,
-                reasoning_parser_kwargs=reasoning_parser_kwargs
-                if self.parser and self.parser.reasoning_parser_cls is not None
-                else None,
             )
             generators.append(generator)
 
@@ -612,7 +594,6 @@ class OpenAIServingResponses(OpenAIServing):
             default_template_kwargs=None,
             tool_dicts=tool_dicts,
             tool_parser=self.parser.tool_parser_cls if self.parser else None,
-            reasoning_parser=self.parser.reasoning_parser_cls if self.parser else None,
         )
         return messages, engine_inputs
 
@@ -637,7 +618,6 @@ class OpenAIServingResponses(OpenAIServing):
             default_template_kwargs=None,
             tool_dicts=tool_dicts,
             tool_parser=tool_parser,
-            reasoning_parser=self.parser.reasoning_parser_cls if self.parser else None,
         )
         return engine_inputs
 
@@ -650,7 +630,6 @@ class OpenAIServingResponses(OpenAIServing):
         lora_request: LoRARequest | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
-        reasoning_parser_kwargs: dict[str, Any] | None = None,
     ):
         max_model_len = self.model_config.max_model_len
 
@@ -674,7 +653,6 @@ class OpenAIServingResponses(OpenAIServing):
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=priority,
-                reasoning_parser_kwargs=reasoning_parser_kwargs,
             )
 
             async for res in generator:
@@ -727,10 +705,9 @@ class OpenAIServingResponses(OpenAIServing):
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
     ):
-        if request.tool_choice not in ("auto", "none"):
+        if request.tool_choice != "auto":
             raise NotImplementedError(
-                "Only 'auto' or 'none' tool_choice is supported "
-                "in response API with Harmony"
+                "Only 'auto' tool_choice is supported in response API with Harmony"
             )
 
         arrival_time = time.time()
@@ -856,10 +833,7 @@ class OpenAIServingResponses(OpenAIServing):
             and self.parser.reasoning_parser_cls is not None
             and isinstance(context, (SimpleContext, ParsableContext))
         ):
-            reasoning_parser = self.parser.reasoning_parser_cls(
-                tokenizer,
-                chat_template_kwargs=self._effective_chat_template_kwargs(request),
-            )
+            reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
             accumulated = getattr(context, "_accumulated_token_ids", []) or []
             num_reasoning_tokens = reasoning_parser.count_reasoning_tokens(accumulated)
 
@@ -1365,7 +1339,6 @@ class OpenAIServingResponses(OpenAIServing):
         current_content_index = 0
         current_output_index = 0
         current_item_id = ""
-        current_tool_call_index: int | None = None
         parser = self.parser(tokenizer, request.tools) if self.parser else None
         first_delta_sent = False
         previous_delta_messages: list[DeltaMessage] = []
@@ -1393,7 +1366,6 @@ class OpenAIServingResponses(OpenAIServing):
                     )
                 if not delta_message:
                     continue
-                tool_call_item_started = False
                 if not first_delta_sent:
                     current_item_id = random_uuid()
                     if delta_message.tool_calls:
@@ -1410,7 +1382,6 @@ class OpenAIServingResponses(OpenAIServing):
                         current_tool_call_name = delta_message.tool_calls[
                             0
                         ].function.name
-                        current_tool_call_index = delta_message.tool_calls[0].index
                         yield _increment_sequence_number_and_return(
                             ResponseOutputItemAddedEvent(
                                 type="response.output_item.added",
@@ -1421,12 +1392,13 @@ class OpenAIServingResponses(OpenAIServing):
                                     id=current_item_id,
                                     call_id=current_tool_call_id,
                                     name=current_tool_call_name,
-                                    arguments="",
+                                    arguments=delta_message.tool_calls[
+                                        0
+                                    ].function.arguments,
                                     status="in_progress",
                                 ),
                             )
                         )
-                        tool_call_item_started = True
                     elif delta_message.reasoning:
                         yield _increment_sequence_number_and_return(
                             ResponseOutputItemAddedEvent(
@@ -1598,79 +1570,6 @@ class OpenAIServingResponses(OpenAIServing):
                     # reset previous delta messages
                     previous_delta_messages = []
                 if delta_message.tool_calls and delta_message.tool_calls[0].function:
-                    tool_call = delta_message.tool_calls[0]
-                    tool_call_function = tool_call.function
-                    if (
-                        current_tool_call_index is not None
-                        and tool_call.index is not None
-                        and tool_call.index != current_tool_call_index
-                        and tool_call_function is not None
-                        and tool_call_function.name is not None
-                    ):
-                        # From one tool call to another, finalize the previous
-                        # function-call item before opening the next one.
-                        parts = []
-                        for pm in previous_delta_messages:
-                            if pm.tool_calls:
-                                previous_tool_call = pm.tool_calls[0]
-                                if previous_tool_call.function is not None:
-                                    parts.append(
-                                        previous_tool_call.function.arguments or ""
-                                    )
-
-                        tool_call_arguments = "".join(parts)
-                        yield _increment_sequence_number_and_return(
-                            ResponseFunctionCallArgumentsDoneEvent(
-                                type="response.function_call_arguments.done",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item_id=current_item_id,
-                                arguments=tool_call_arguments,
-                                name=current_tool_call_name,
-                            )
-                        )
-                        function_call_item = ResponseFunctionToolCall(
-                            type="function_call",
-                            name=current_tool_call_name,
-                            arguments=tool_call_arguments,
-                            status="completed",
-                            id=current_item_id,
-                            call_id=current_tool_call_id,
-                        )
-                        yield _increment_sequence_number_and_return(
-                            ResponseOutputItemDoneEvent(
-                                type="response.output_item.done",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item=function_call_item,
-                            )
-                        )
-                        # Reset previous delta messages so the next tool call
-                        # does not reuse arguments from the completed item.
-                        previous_delta_messages = []
-                        current_output_index += 1
-                        current_item_id = random_uuid()
-                        current_tool_call_name = tool_call_function.name
-                        current_tool_call_id = f"call_{random_uuid()}"
-                        current_tool_call_index = tool_call.index
-                        yield _increment_sequence_number_and_return(
-                            ResponseOutputItemAddedEvent(
-                                type="response.output_item.added",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item=ResponseFunctionToolCallItem(
-                                    type="function_call",
-                                    id=current_item_id,
-                                    call_id=current_tool_call_id,
-                                    name=current_tool_call_name,
-                                    arguments="",
-                                    status="in_progress",
-                                ),
-                            )
-                        )
-                        current_content_index = 0
-                        tool_call_item_started = True
-
                     if delta_message.tool_calls[0].function.arguments:
                         yield _increment_sequence_number_and_return(
                             ResponseFunctionCallArgumentsDeltaEvent(
@@ -1682,10 +1581,7 @@ class OpenAIServingResponses(OpenAIServing):
                             )
                         )
                     # tool call initiated with no arguments
-                    elif (
-                        delta_message.tool_calls[0].function.name
-                        and not tool_call_item_started
-                    ):
+                    elif delta_message.tool_calls[0].function.name:
                         # send done with current content part
                         # and add new function call item
                         yield _increment_sequence_number_and_return(
@@ -1730,11 +1626,11 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                         current_output_index += 1
                         current_item_id = random_uuid()
+                        assert delta_message.tool_calls[0].function is not None
                         current_tool_call_name = delta_message.tool_calls[
                             0
                         ].function.name
                         current_tool_call_id = f"call_{random_uuid()}"
-                        current_tool_call_index = delta_message.tool_calls[0].index
                         yield _increment_sequence_number_and_return(
                             ResponseOutputItemAddedEvent(
                                 type="response.output_item.added",
@@ -2011,7 +1907,7 @@ class OpenAIServingResponses(OpenAIServing):
                 output=[],
                 status="in_progress",
                 usage=None,
-            ).model_dump(mode="json", by_alias=True)
+            ).model_dump()
             yield _increment_sequence_number_and_return(
                 ResponseCreatedEvent(
                     type="response.created",

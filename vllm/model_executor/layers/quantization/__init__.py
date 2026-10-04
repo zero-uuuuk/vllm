@@ -22,7 +22,6 @@ QuantizationMethods = Literal[
     "gptq_marlin",
     "awq_marlin",
     "gptq",
-    "humming",
     "compressed-tensors",
     "bitsandbytes",
     "experts_int8",
@@ -31,8 +30,7 @@ QuantizationMethods = Literal[
     "torchao",
     "inc",
     "mxfp4",
-    "gpt_oss_mxfp4",
-    "deepseek_v4_fp8",
+    "mxfp8",
     "cpu_awq",
     "online",
     # Below are values of the OnlineQuantScheme enum, specified as strings to
@@ -41,8 +39,6 @@ QuantizationMethods = Literal[
     # shorthand for creating a more complicated online quant config object
     "fp8_per_tensor",
     "fp8_per_block",
-    "int8_per_channel_weight_only",
-    "mxfp8",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
@@ -50,6 +46,7 @@ DEPRECATED_QUANTIZATION_METHODS = [
     "tpu_int8",
     "fbgemm_fp8",
     "fp_quant",
+    "experts_int8",
 ]
 
 # The customized quantization methods which will be added to this dict.
@@ -113,7 +110,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     # lazy import to avoid triggering `torch.compile` too early
     from vllm.config.quantization import OnlineQuantScheme
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
-    from vllm.model_executor.models.deepseek_v4 import DeepseekV4FP8Config
 
     from .awq import AWQConfig
     from .awq_marlin import AWQMarlinConfig
@@ -129,7 +125,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .gguf import GGUFConfig
     from .gptq import GPTQConfig
     from .gptq_marlin import GPTQMarlinConfig
-    from .humming import HummingConfig
     from .inc import INCConfig
     from .modelopt import (
         ModelOptFp8Config,
@@ -138,7 +133,8 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         ModelOptNvFp4Config,
     )
     from .moe_wna16 import MoeWNA16Config
-    from .mxfp4 import GptOssMxfp4Config, Mxfp4Config
+    from .mxfp4 import Mxfp4Config
+    from .mxfp8 import Mxfp8Config
     from .online.base import OnlineQuantizationConfig
     from .torchao import TorchAOConfig
 
@@ -164,10 +160,8 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "auto-round": INCConfig,
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
-        "gpt_oss_mxfp4": GptOssMxfp4Config,
-        "deepseek_v4_fp8": DeepseekV4FP8Config,
+        "mxfp8": Mxfp8Config,
         "cpu_awq": CPUAWQConfig,
-        "humming": HummingConfig,
         "online": OnlineQuantizationConfig,
     }
 

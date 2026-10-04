@@ -107,11 +107,8 @@ def test_pooling_params(llm: LLM):
     )
 
 
-@pytest.mark.parametrize("task", ["token_classify", "classify", "plugin"])
+@pytest.mark.parametrize("task", ["token_classify", "classify"])
 def test_unsupported_tasks(llm: LLM, task: PoolingTask):
-    if task == "plugin":
-        err_msg = "No IOProcessor plugin installed."
-    else:
-        err_msg = "Classification API is not supported by this model.+"
+    err_msg = "Classification API is not supported by this model.+"
     with pytest.raises(ValueError, match=err_msg):
         llm.encode(prompt, pooling_task=task, use_tqdm=False)

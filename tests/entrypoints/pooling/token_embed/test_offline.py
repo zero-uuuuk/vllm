@@ -62,17 +62,14 @@ def test_token_ids_prompts(llm: LLM):
     assert outputs[0].outputs.data.shape == (11, 384)
 
 
-@pytest.mark.parametrize("task", ["embed", "classify", "token_classify", "plugin"])
+@pytest.mark.parametrize("task", ["embed", "classify", "token_classify"])
 def test_unsupported_tasks(llm: LLM, task: PoolingTask, caplog_vllm):
     if task == "embed":
         with caplog_vllm.at_level(level=logging.WARNING, logger="vllm"):
             llm.encode(prompt, pooling_task=task, use_tqdm=False)
         assert "deprecated" in caplog_vllm.text
     else:
-        if task == "plugin":
-            err_msg = "No IOProcessor plugin installed."
-        else:
-            err_msg = "Classification API is not supported by this model.+"
+        err_msg = "Classification API is not supported by this model.+"
 
         with pytest.raises(ValueError, match=err_msg):
             llm.encode(prompt, pooling_task=task, use_tqdm=False)

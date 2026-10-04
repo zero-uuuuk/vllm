@@ -9,7 +9,6 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
 from vllm.triton_utils import triton
-from vllm.utils.torch_utils import set_random_seed
 
 
 def get_topk_ids(num_tokens: int, num_experts: int, topk: int) -> torch.Tensor:
@@ -45,7 +44,7 @@ configs = list(
 def benchmark(num_tokens, num_experts, topk, ep_size, provider):
     """Benchmark function for Triton."""
     block_size = 256
-    set_random_seed(0)
+    torch.cuda.manual_seed_all(0)
     topk_ids = get_topk_ids(num_tokens, num_experts, topk)
 
     e_map = None

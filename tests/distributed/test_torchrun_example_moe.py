@@ -10,8 +10,7 @@ import torch.distributed as dist
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import get_tp_group, get_world_group
 
-# Let PyTorch choose the WORLD backend for the current device type.
-dist.init_process_group()
+dist.init_process_group(backend="gloo")
 
 # Create prompts
 prompts = [
@@ -37,10 +36,8 @@ llm = LLM(
     pipeline_parallel_size=int(os.getenv("PP_SIZE", "1")),
     enable_expert_parallel=int(os.getenv("ENABLE_EP", "0")) == 1,
     distributed_executor_backend="external_launcher",
-    gpu_memory_utilization=random.uniform(0.8, 0.92),
+    gpu_memory_utilization=random.uniform(0.7, 0.9),
     seed=0,
-    max_model_len=1024,
-    max_num_seqs=16,
 )
 
 outputs = llm.generate(prompts, sampling_params)

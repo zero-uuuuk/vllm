@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The request function for API endpoints."""
 
-import codecs
 import io
 import json
 import os
@@ -26,12 +25,11 @@ class StreamedResponseHandler:
 
     def __init__(self):
         self.buffer = ""
-        self._decoder = codecs.getincrementaldecoder("utf-8")()
 
     def add_chunk(self, chunk_bytes: bytes) -> list[str]:
         """Add a chunk of bytes to the buffer and return any complete
         messages."""
-        chunk_str = self._decoder.decode(chunk_bytes)
+        chunk_str = chunk_bytes.decode("utf-8")
         self.buffer += chunk_str
 
         messages = []
@@ -239,8 +237,6 @@ async def async_request_openai_completions(
                                 generated_text += text or ""
                             elif usage := data.get("usage"):
                                 output.output_tokens = usage.get("completion_tokens")
-                                if (pt := usage.get("prompt_tokens")) is not None:
-                                    output.prompt_len = pt
                 if first_chunk_received:
                     output.success = True
                 else:
@@ -362,8 +358,6 @@ async def async_request_openai_chat_completions(
                                 generated_text += content or ""
                             elif usage := data.get("usage"):
                                 output.output_tokens = usage.get("completion_tokens")
-                                if (pt := usage.get("prompt_tokens")) is not None:
-                                    output.prompt_len = pt
 
                             most_recent_timestamp = timestamp
 

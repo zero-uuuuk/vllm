@@ -165,7 +165,6 @@ def get_mt_bench_prompts(
         no_stream=True,
         disable_shuffle=False,
         skip_chat_template=False,
-        trust_remote_code=False,
     )
     samples = get_samples(args, tokenizer)
     prompt_ids = [
@@ -211,8 +210,8 @@ def extract_acceptance_metrics(metrics, num_spec_tokens: int) -> dict:
 
 @large_gpu_mark(min_gb=40)
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="This test is only supported on CUDA-alike platforms.",
+    not current_platform.is_cuda(),
+    reason="This test is only supported on CUDA platform.",
 )
 @pytest.mark.parametrize(
     "model_config",

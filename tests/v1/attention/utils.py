@@ -21,11 +21,10 @@ from vllm.config.model import ModelDType
 from vllm.v1.attention.backend import (
     AttentionImpl,
     AttentionMetadataBuilder,
-    AttentionType,
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec, FullAttentionSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 
 @dataclass
@@ -107,7 +106,6 @@ def create_common_attn_metadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
-        seq_lens_cpu_upper_bound=seq_lens_cpu,
         _seq_lens_cpu=seq_lens_cpu,
         _num_computed_tokens_cpu=num_computed_tokens_cpu,
         num_reqs=batch_spec.batch_size,
@@ -144,24 +142,8 @@ def try_backend_includes_kv_cache_update(
         raise AssertionError("unreachable") from None
 
 
-def create_standard_kv_cache_spec(
-    vllm_config: VllmConfig,
-    attn_type: AttentionType = AttentionType.DECODER,
-) -> FullAttentionSpec | EncoderOnlyAttentionSpec:
-    """Create an AttentionSpec from VllmConfig.
-
-    Returns an EncoderOnlyAttentionSpec for encoder-only attention (no KV
-    cache), and a FullAttentionSpec otherwise.
-    """
-    if attn_type == AttentionType.ENCODER_ONLY:
-        return EncoderOnlyAttentionSpec(
-            block_size=vllm_config.cache_config.block_size,
-            num_kv_heads=vllm_config.model_config.get_num_kv_heads(
-                vllm_config.parallel_config
-            ),
-            head_size=vllm_config.model_config.get_head_size(),
-            dtype=vllm_config.model_config.dtype,
-        )
+def create_standard_kv_cache_spec(vllm_config: VllmConfig) -> FullAttentionSpec:
+    """Create a FullAttentionSpec from ModelParams only."""
     return FullAttentionSpec(
         block_size=vllm_config.cache_config.block_size,
         num_kv_heads=vllm_config.model_config.get_num_kv_heads(

@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import json
 import time
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import Literal, TypeAlias
 
 import torch
 from fastapi import HTTPException, UploadFile
@@ -13,7 +12,6 @@ from pydantic import (
     model_validator,
 )
 
-from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     OpenAIBaseModel,
@@ -27,11 +25,6 @@ from vllm.sampling_params import (
     SamplingParams,
 )
 from vllm.utils import random_uuid
-
-if TYPE_CHECKING:
-    import numpy as np
-
-    from vllm.config import ModelConfig, SpeechToTextConfig
 
 logger = init_logger(__name__)
 _LONG_INFO = torch.iinfo(torch.long)
@@ -76,12 +69,6 @@ class TranscriptionRequest(OpenAIBaseModel):
     Supplying the input language in
     [ISO-639-1](https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes) format
     will improve accuracy and latency.
-    """
-
-    hotwords: str | None = None
-    """
-    hotwords refers to a list of important words or phrases that the model
-    should pay extra attention to during transcription.
     """
 
     prompt: str = Field(default="")
@@ -196,24 +183,6 @@ class TranscriptionRequest(OpenAIBaseModel):
         "min_p": 0.0,
     }
 
-    def build_stt_params(
-        self,
-        audio: "np.ndarray",
-        stt_config: "SpeechToTextConfig",
-        model_config: "ModelConfig",
-        task_type: str,
-    ) -> SpeechToTextParams:
-        return SpeechToTextParams(
-            audio=audio,
-            stt_config=stt_config,
-            model_config=model_config,
-            language=self.language,
-            task_type=task_type,
-            request_prompt=self.prompt,
-            to_language=self.to_language,
-            hotwords=self.hotwords,
-        )
-
     def to_beam_search_params(
         self,
         default_max_tokens: int,
@@ -307,17 +276,6 @@ class TranscriptionRequest(OpenAIBaseModel):
                 "Stream options can only be defined when `stream=True`.",
                 parameter=invalid_param,
             )
-
-        # Parse vllm_xargs from JSON string (form data sends it as a string)
-        xargs = data.get("vllm_xargs")
-        if isinstance(xargs, str):
-            try:
-                data["vllm_xargs"] = json.loads(xargs)
-            except json.JSONDecodeError as e:
-                raise VLLMValidationError(
-                    f"Failed to parse vllm_xargs. Must be valid JSON: {e}",
-                    parameter="vllm_xargs",
-                ) from e
 
         return data
 
@@ -488,12 +446,6 @@ class TranslationRequest(OpenAIBaseModel):
     will improve accuracy.
     """
 
-    hotwords: str | None = None
-    """
-    hotwords refers to a list of important words or phrases that the model
-    should pay extra attention to during transcription.
-    """
-
     to_language: str | None = None
     """The language of the input audio we translate to.
 
@@ -519,24 +471,6 @@ class TranslationRequest(OpenAIBaseModel):
     _DEFAULT_SAMPLING_PARAMS: dict = {
         "temperature": 0,
     }
-
-    def build_stt_params(
-        self,
-        audio: "np.ndarray",
-        stt_config: "SpeechToTextConfig",
-        model_config: "ModelConfig",
-        task_type: str,
-    ) -> SpeechToTextParams:
-        return SpeechToTextParams(
-            audio=audio,
-            stt_config=stt_config,
-            model_config=model_config,
-            language=self.language,
-            task_type=task_type,
-            request_prompt=self.prompt,
-            to_language=self.to_language,
-            hotwords=self.hotwords,
-        )
 
     def to_beam_search_params(
         self,

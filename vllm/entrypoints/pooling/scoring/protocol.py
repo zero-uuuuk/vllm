@@ -8,35 +8,18 @@ from pydantic import BaseModel, Field
 from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.pooling.base.protocol import (
+    ClassifyRequestMixin,
+    PoolingBasicRequestMixin,
+)
 from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
 
-from ..base.protocol import ClassifyRequestMixin, PoolingBasicRequestMixin
 from .typing import ScoreContentPartParam, ScoreInput
 
 
-class ScoringRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
-    # --8<-- [start:scoring-common-params]
-    max_tokens_per_query: int = Field(
-        default=0,
-        description=(
-            "Maximum number of tokens per query. Queries longer than "
-            "this will be truncated to this length. 0 means no "
-            "query-level truncation is applied."
-        ),
-    )
-    max_tokens_per_doc: int = Field(
-        default=0,
-        description=(
-            "Maximum number of tokens per document. Documents longer than "
-            "this will be truncated to this length. 0 means no "
-            "document-level truncation is applied (only truncate_prompt_tokens "
-            "applies to the combined query+document)."
-        ),
-    )
-    # --8<-- [end:scoring-common-params]
-
+class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         encoder_config = model_config.encoder_config or {}
 
@@ -56,16 +39,14 @@ class ScoringRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
         )
 
 
-class ScoreDataRequest(ScoringRequestMixin):
+class ScoreDataRequest(ScoreRequestMixin):
     data_1: ScoreInput | list[ScoreInput]
     data_2: ScoreInput | list[ScoreInput]
 
 
-class ScoreQueriesDocumentsRequest(ScoringRequestMixin):
-    # --8<-- [start:score-request-params]
+class ScoreQueriesDocumentsRequest(ScoreRequestMixin):
     queries: ScoreInput | list[ScoreInput]
     documents: ScoreInput | list[ScoreInput]
-    # --8<-- [end:score-request-params]
 
     @property
     def data_1(self):
@@ -76,7 +57,7 @@ class ScoreQueriesDocumentsRequest(ScoringRequestMixin):
         return self.documents
 
 
-class ScoreQueriesItemsRequest(ScoringRequestMixin):
+class ScoreQueriesItemsRequest(ScoreRequestMixin):
     queries: ScoreInput | list[ScoreInput]
     items: ScoreInput | list[ScoreInput]
 
@@ -89,7 +70,7 @@ class ScoreQueriesItemsRequest(ScoringRequestMixin):
         return self.items
 
 
-class ScoreTextRequest(ScoringRequestMixin):
+class ScoreTextRequest(ScoreRequestMixin):
     text_1: ScoreInput | list[ScoreInput]
     text_2: ScoreInput | list[ScoreInput]
 
@@ -110,12 +91,28 @@ ScoreRequest: TypeAlias = (
 )
 
 
-class RerankRequest(ScoringRequestMixin):
-    # --8<-- [start:rerank-request-params]
+class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
     query: ScoreInput
     documents: ScoreInput | list[ScoreInput]
     top_n: int = Field(default_factory=lambda: 0)
-    # --8<-- [end:rerank-request-params]
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        encoder_config = model_config.encoder_config or {}
+
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=0,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            truncation_side=self.truncation_side,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            max_total_tokens_param="max_model_len",
+        )
+
+    def to_pooling_params(self, task: PoolingTask = "classify"):
+        return PoolingParams(
+            task=task,
+            use_activation=self.use_activation,
+        )
 
 
 ScoringRequest: TypeAlias = ScoreRequest | RerankRequest

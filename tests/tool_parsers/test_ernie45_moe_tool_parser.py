@@ -328,7 +328,7 @@ def test_extract_tool_calls_streaming_incremental(
     expected_content,
 ):
     """Verify the Ernie45 Parser streaming behavior by verifying each chunk is as expected."""  # noqa: E501
-    request = ChatCompletionRequest(model=MODEL, messages=[])
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=[])
 
     tool_calls_dict = {}
     for delta_message in stream_delta_message_generator(

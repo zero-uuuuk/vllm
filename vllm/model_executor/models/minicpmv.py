@@ -1050,16 +1050,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "resampler"),
             )
-            self._resampler_moved = False
 
         self.make_empty_intermediate_tensors = self.llm.make_empty_intermediate_tensors
-
-    def _ensure_resampler_device(self) -> None:
-        if self._resampler_moved:
-            return
-        # Only move device, DO NOT touch dtype (fp8 quant needs its own dtype)
-        self.resampler.to(current_platform.device_type)
-        self._resampler_moved = True
 
     def _parse_and_validate_vision_input(
         self,
@@ -1179,9 +1171,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(weights)
-        self._ensure_resampler_device()
-        return loaded
+        return loader.load_weights(weights)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """
@@ -1286,7 +1276,9 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
                 prefix=prefix,
             )
 
-        return resampler.to(dtype=torch.get_default_dtype())
+        return resampler.to(
+            device=current_platform.device_type, dtype=torch.get_default_dtype()
+        )
 
     def get_vision_hidden_states(self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]
@@ -1367,7 +1359,9 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
                 prefix=prefix,
             )
 
-        return resampler.to(dtype=torch.get_default_dtype())
+        return resampler.to(
+            device=current_platform.device_type, dtype=torch.get_default_dtype()
+        )
 
     def get_vision_hidden_states(self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]
@@ -1458,8 +1452,11 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
                 quant_config=quant_config,
                 prefix=prefix,
             )
-
-        return resampler.to(dtype=torch.get_default_dtype())
+        target_device = current_platform.device_type
+        target_dtype = torch.get_default_dtype()
+        if any(p.is_meta for p in resampler.parameters()):
+            return resampler.to_empty(device=target_device).to(dtype=target_dtype)
+        return resampler.to(device=target_device, dtype=target_dtype)
 
     def get_vision_hidden_states(self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]
@@ -1494,9 +1491,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["apm.", "audio", "tts"])
-        loaded = loader.load_weights(weights)
-        self._ensure_resampler_device()
-        return loaded
+        return loader.load_weights(weights)
 
 
 class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
@@ -1556,7 +1551,10 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
                 quant_config=quant_config,
                 prefix=prefix,
             )
-        return resampler.to(dtype=torch.get_default_dtype())
+
+        return resampler.to(
+            device=current_platform.device_type, dtype=torch.get_default_dtype()
+        )
 
     def get_vision_hidden_states(self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]
@@ -1591,9 +1589,7 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["apm.", "audio", "tts"])
-        loaded = loader.load_weights(weights)
-        self._ensure_resampler_device()
-        return loaded
+        return loader.load_weights(weights)
 
 
 class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
@@ -1653,8 +1649,11 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
                 quant_config=quant_config,
                 prefix=prefix,
             )
-
-        return resampler.to(dtype=torch.get_default_dtype())
+        target_device = current_platform.device_type
+        target_dtype = torch.get_default_dtype()
+        if any(p.is_meta for p in resampler.parameters()):
+            return resampler.to_empty(device=target_device).to(dtype=target_dtype)
+        return resampler.to(device=target_device, dtype=target_dtype)
 
     def get_vision_hidden_states(self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]
@@ -1693,9 +1692,7 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["apm.", "audio", "tts"])
-        loaded = loader.load_weights(weights)
-        self._ensure_resampler_device()
-        return loaded
+        return loader.load_weights(weights)
 
 
 _SUPPORT_VERSION = {

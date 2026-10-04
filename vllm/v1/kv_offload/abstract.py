@@ -7,7 +7,8 @@ This class runs in the scheduler, tracks which blocks are offloaded
 and their address.
 
 The class provides the following primitives:
-    lookup() - check whether a single block is offloaded and ready.
+    lookup() - find the length of the maximal series of blocks,
+        starting from the first one, that are all offloaded.
     prepare_load() - prepare given blocks to be read.
         The given blocks will be protected from eviction.
         This function returns a LoadSpec which encapsulates
@@ -29,32 +30,8 @@ The class provides the following primitives:
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, NewType
 
-# `OffloadKey` identifies an offloaded block. It combines a block hash with
-# its KV cache group index, encoded as raw bytes to avoid tuple GC overhead.
-# Use the helper functions below to construct / decompose keys.
-OffloadKey = NewType("OffloadKey", bytes)
-
-
-def make_offload_key(block_hash: bytes, group_idx: int) -> OffloadKey:
-    """Pack a block hash and group index into an `OffloadKey`."""
-    return OffloadKey(block_hash + group_idx.to_bytes(4, "big", signed=False))
-
-
-def get_offload_block_hash(key: OffloadKey) -> bytes:
-    """Extract the block hash from an `OffloadKey`."""
-    return key[:-4]
-
-
-def get_offload_group_idx(key: OffloadKey) -> int:
-    """Extract the group index from an `OffloadKey`."""
-    return int.from_bytes(key[-4:], "big", signed=False)
-
-
-@dataclass
-class ReqContext:
-    kv_transfer_params: dict[str, Any] | None = None
+from vllm.v1.core.kv_cache_utils import BlockHash
 
 
 class LoadStoreSpec(ABC):
@@ -75,14 +52,15 @@ class LoadStoreSpec(ABC):
 
 @dataclass
 class PrepareStoreOutput:
-    keys_to_store: list[OffloadKey]
+    block_hashes_to_store: list[BlockHash]
     store_spec: LoadStoreSpec
-    evicted_keys: list[OffloadKey]
+    block_hashes_evicted: list[BlockHash]
 
 
 @dataclass
 class OffloadingEvent:
-    keys: list[OffloadKey]
+    block_hashes: list[BlockHash]
+    block_size: int
     medium: str
     # True if blocks are removed, False if stored
     removed: bool
@@ -90,28 +68,24 @@ class OffloadingEvent:
 
 class OffloadingManager(ABC):
     @abstractmethod
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+    def lookup(self, block_hashes: Iterable[BlockHash]) -> int | None:
         """
-        Checks whether a single block is offloaded and ready to be read.
+        Finds the length of the maximal series of blocks, starting from the
+        first one, that are all offloaded.
 
         Args:
-            key: the key identifying the block to lookup.
-            req_context: per-request context (e.g. kv_transfer_params).
+            block_hashes: the hashes identifying the blocks to lookup.
 
         Returns:
-            True if the block is offloaded and ready, False if not,
-            or None if the lookup should be retried later.
-            Returning None will delay the request handling by the vLLM
+            An integer representing the maximal number of blocks that
+            are currently offloaded, or None if the lookup should be retried
+            later. Returning None will delay the request handling by the vLLM
             scheduler.
         """
         pass
 
     @abstractmethod
-    def prepare_load(
-        self,
-        keys: Iterable[OffloadKey],
-        req_context: ReqContext,
-    ) -> LoadStoreSpec:
+    def prepare_load(self, block_hashes: Iterable[BlockHash]) -> LoadStoreSpec:
         """
         Prepare the given blocks to be read.
         The given blocks will be protected from eviction until
@@ -119,8 +93,7 @@ class OffloadingManager(ABC):
         It assumes all given blocks are offloaded.
 
         Args:
-            keys: the keys identifying the blocks.
-            req_context: per-request context (e.g. kv_transfer_params).
+            block_hashes: the hashes identifying the blocks.
 
         Returns:
             A LoadStoreSpec that can be used by a worker to locate and load
@@ -128,30 +101,28 @@ class OffloadingManager(ABC):
         """
         pass
 
-    def touch(self, keys: Iterable[OffloadKey]):
+    def touch(self, block_hashes: Iterable[BlockHash]):
         """
         Mark the given blocks as recently used.
         This could in practice mean moving them to the end of an LRU list.
 
         Args:
-            keys: the keys identifying the blocks.
+            block_hashes: the hashes identifying the blocks.
         """
         return
 
-    def complete_load(self, keys: Iterable[OffloadKey]):
+    def complete_load(self, block_hashes: Iterable[BlockHash]):
         """
         Marks previous blocks that were prepared to load as done loading.
 
         Args:
-            keys: the keys identifying the blocks.
+            block_hashes: the hashes identifying the blocks.
         """
         return
 
     @abstractmethod
     def prepare_store(
-        self,
-        keys: Iterable[OffloadKey],
-        req_context: ReqContext,
+        self, block_hashes: Iterable[BlockHash]
     ) -> PrepareStoreOutput | None:
         """
         Prepare the given blocks to be offloaded.
@@ -159,8 +130,7 @@ class OffloadingManager(ABC):
         complete_store is called.
 
         Args:
-            keys: the keys identifying the blocks.
-            req_context: per-request context (e.g. kv_transfer_params).
+            block_hashes: the hashes identifying the blocks.
 
         Returns:
             A PrepareStoreOutput indicating which blocks need storing,
@@ -170,7 +140,7 @@ class OffloadingManager(ABC):
         """
         pass
 
-    def complete_store(self, keys: Iterable[OffloadKey], success: bool = True):
+    def complete_store(self, block_hashes: Iterable[BlockHash], success: bool = True):
         """
         Marks blocks which were previously prepared to be stored, as stored.
         Following this call, the blocks become loadable.
@@ -178,7 +148,7 @@ class OffloadingManager(ABC):
         removed.
 
         Args:
-            keys: the keys identifying the blocks.
+            block_hashes: the hashes identifying the blocks.
             success: whether the blocks were stored successfully.
         """
         return
@@ -191,7 +161,3 @@ class OffloadingManager(ABC):
             New OffloadingEvents collected since the last call.
         """
         return ()
-
-    def shutdown(self) -> None:
-        """Shutdown the manager and release any resources."""
-        return

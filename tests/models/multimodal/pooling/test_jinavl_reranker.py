@@ -15,11 +15,6 @@ from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
 
 from ....conftest import HfRunner, VllmRunner
 
-pytestmark = pytest.mark.skip(
-    reason="jinaai/jina-reranker-m0 custom code is incompatible with "
-    "transformers v5 (missing all_tied_weights_keys)"
-)
-
 MODELS = ["jinaai/jina-reranker-m0"]
 
 MM_PROCESSOR_KWARGS = {

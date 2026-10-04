@@ -35,10 +35,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -338,12 +335,13 @@ class SarvamMLAMoE(nn.Module):
         else:
             self.shared_experts = None
 
-        self.experts = FusedMoE(
+        self.experts = SharedFusedMoE(
             shared_experts=self.shared_experts,
             num_experts=self.num_experts,
             top_k=self.top_k,
             hidden_size=self.hidden_size,
             intermediate_size=config.moe_intermediate_size,
+            reduce_results=False,
             renormalize=self.norm_expert_prob,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -355,7 +353,7 @@ class SarvamMLAMoE(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
         )
 
-    def maybe_get_fused_moe(self) -> FusedMoE:
+    def maybe_get_fused_moe(self) -> SharedFusedMoE:
         return self.experts
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -372,7 +370,20 @@ class SarvamMLAMoE(nn.Module):
             router_logits=router_logits,
         )
 
-        return final_hidden.view(num_tokens, hidden_dim)
+        if self.shared_experts is not None:
+            shared_output, expert_output = final_hidden
+        else:
+            shared_output, expert_output = None, final_hidden
+
+        if shared_output is not None:
+            expert_output = expert_output + shared_output
+
+        if self.tp_size > 1:
+            expert_output = self.experts.maybe_all_reduce_tensor_model_parallel(
+                expert_output
+            )
+
+        return expert_output.view(num_tokens, hidden_dim)
 
 
 class SarvamMLABlock(nn.Module):
@@ -532,7 +543,7 @@ class SarvamMLAModel(nn.Module):
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return fused_moe_make_expert_params_mapping(
+        return SharedFusedMoE.make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",

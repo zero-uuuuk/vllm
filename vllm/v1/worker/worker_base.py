@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
 import torch.nn as nn
@@ -28,11 +28,6 @@ else:
 logger = init_logger(__name__)
 
 _R = TypeVar("_R")
-
-
-class CompilationTimes(NamedTuple):
-    language_model: float
-    encoder: float
 
 
 class WorkerBase:
@@ -91,11 +86,11 @@ class WorkerBase:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
 
-    def compile_or_warm_up_model(self) -> CompilationTimes:
+    def compile_or_warm_up_model(self) -> float:
         """Prepare model for execution through compilation/warmup.
 
         Returns:
-            Compilation times (language_model, encoder) in seconds.
+            The accumulated compilation time in seconds.
         """
         raise NotImplementedError
 

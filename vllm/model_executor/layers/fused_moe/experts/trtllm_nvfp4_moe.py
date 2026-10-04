@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
+import flashinfer
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -50,9 +50,6 @@ class TrtLlmNvFp4ExpertsBase:
             moe_config.intermediate_size_per_partition
         )
         self.hidden_dim = moe_config.hidden_dim
-        self.hidden_dim_unpadded = (
-            moe_config.hidden_dim_unpadded or moe_config.hidden_dim
-        )
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
@@ -117,12 +114,8 @@ class TrtLlmNvFp4ExpertsBase:
 
     @staticmethod
     def _supports_shape(hidden_dim: int) -> bool:
-        # Weights are zero-padded to 256-alignment at load time and the MoE
-        # runner pads activations via _maybe_pad_hidden_states, so any
-        # hidden_dim is accepted.
-        # NOTE: non-256-aligned dims will trigger a warning log and may
-        # cause performance degradation due to activation slicing.
-        return True
+        """Requires hidden dim to be multiple of 512."""
+        return hidden_dim % 512 == 0
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -188,8 +181,6 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        import flashinfer
-
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
         assert a1q_scale is not None
         assert self.quant_config.w1_scale is not None
@@ -203,7 +194,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         import vllm.utils.flashinfer as fi_utils
 
         if fi_utils._is_fi_autotuning:
-            return
+            return hidden_states
 
         # Invoke kernel.
         flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
@@ -308,8 +299,6 @@ class TrtLlmNvFp4ExpertsMonolithic(
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor:
-        import flashinfer
-
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
         assert a1q_scale is not None
         assert self.quant_config.w1_scale is not None
@@ -335,8 +324,6 @@ class TrtLlmNvFp4ExpertsMonolithic(
             e_score_correction_bias = e_score_correction_bias.to(torch.bfloat16)
 
         # Invoke kernel.
-        # NOTE: Activation padding and output
-        # truncation are handled by the MoE runner's
         return flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,

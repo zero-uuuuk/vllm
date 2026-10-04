@@ -17,13 +17,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from importlib.metadata import version
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
-from packaging.version import Version
 from transformers import PretrainedConfig
 
 from tests.models.registry import HF_EXAMPLE_MODELS
@@ -124,11 +122,6 @@ def test_musicflamingo_dummy_text_uses_plain_audio_tokens(mock_ctx):
     assert builder.get_dummy_text({"audio": 2}) == "<sound><sound>"
 
 
-@pytest.mark.skipif(
-    Version(version("transformers")) >= Version("5.5"),
-    reason="transformers v5.5 added native MusicFlamingoForConditionalGeneration "
-    "with a different get_audio_features signature (requires input_ids)",
-)
 def test_musicflamingo_audio_feature_pipeline_matches_hf_small_config():
     from transformers.models.musicflamingo import (
         modeling_musicflamingo as hf_musicflamingo_modeling,

@@ -92,7 +92,9 @@ class EPLBController:
         if not is_mixture_of_experts(model):
             return False
 
-        logger.info_once("EPLB is enabled for model %s.", model_config.model)
+        logger.info_once(
+            "EPLB is enabled for model %s.", model_config.model, scope="local"
+        )
         assert self.state is not None
         self.state.add_model(model, model_config)
         self._has_registered_models = True

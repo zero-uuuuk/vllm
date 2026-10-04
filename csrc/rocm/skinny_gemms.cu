@@ -26,9 +26,14 @@
   #define __HIP__GFX9__
 #endif
 
-// Combined RDNA macro (gfx11 + gfx12) - both use 32-wide wavefronts
-#if defined(__GFX11__) || defined(__GFX12__)
+#if defined(__HIPCC__) &&                                                    \
+    (defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1150__) || \
+     defined(__gfx1151__) || defined(__gfx1200__) || defined(__gfx1201__))
   #define __HIP__GFX1X__
+#endif
+
+#if defined(__HIPCC__) && (defined(__gfx1200__) || defined(__gfx1201__))
+  #define __HIP__GFX12__
 #endif
 
 #if defined(__HIPCC__) && (defined(__gfx942__) || defined(__gfx950__))
@@ -1840,7 +1845,7 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   return out_c;
 }
 
-#if defined(__HIP__MI3XX__) || defined(__GFX12__)
+#if defined(__HIP__MI3XX__) || defined(__HIP__GFX12__)
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
@@ -1888,7 +1893,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   float sB = *s_B;
 
   while (m < M) {
-  #ifdef __GFX12__
+  #ifdef __HIP__GFX12__
     // gfx12: per-lane scalar accumulation via v_dot4_f32_fp8_fp8
     float sum[N][YTILE] = {};
   #else
@@ -1926,7 +1931,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         for (uint32_t n = 0; n < N; n++) {
-  #ifdef __GFX12__
+  #ifdef __HIP__GFX12__
           // gfx12: 4 x dot4 per A_CHUNK=16 bytes (4 FP8 per dot4)
           for (int y = 0; y < YTILE; ++y) {
     #pragma unroll
@@ -1950,7 +1955,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     }
 
     // Final reduction
-  #ifdef __GFX12__
+  #ifdef __HIP__GFX12__
     // gfx12 wave32: DPP row_shr within 16-lane rows + cross-row shuffle
     for (int n = 0; n < N; n++) {
       for (int y = 0; y < YTILE; y++) {
@@ -1988,7 +1993,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #endif
 
     const bool writeback_lane =
-  #ifdef __GFX12__
+  #ifdef __HIP__GFX12__
         threadIdx.x == (THRDS - 1);
   #else
         threadIdx.x == 0;
@@ -2004,7 +2009,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           if (y + m >= M) break;  // To avoid mem access fault.
-  #ifdef __GFX12__
+  #ifdef __HIP__GFX12__
           float result = sum[n][y] * sA * sB;
   #else
           float result = sum[n][y][0] * sA * sB;
@@ -2022,7 +2027,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     m += CuCount * _WvPrGrp * YTILE;
   }
 }
-#else   // !defined(__HIP__MI3XX__) && !defined(__GFX12__)
+#else   // !defined(__HIP__MI3XX__) && !defined(__HIP__GFX12__)
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void wvSplitKQ_hf_sml_(const int K, const int Kap, const int Kbp,
@@ -2034,9 +2039,9 @@ __global__ void wvSplitKQ_hf_sml_(const int K, const int Kap, const int Kbp,
                                   const int _WvPrGrp, const int CuCount) {
   UNREACHABLE_CODE
 }
-#endif  // defined(__HIP__MI3XX__) || defined(__GFX12__)
+#endif  // defined(__HIP__MI3XX__) || defined(__HIP__GFX12__)
 
-#if defined(__HIP__MI3XX__) || defined(__GFX12__)
+#if defined(__HIP__MI3XX__) || defined(__HIP__GFX12__)
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
@@ -2083,7 +2088,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   float sB = *s_B;
 
   while (m < M) {
-  #ifdef __GFX12__
+  #ifdef __HIP__GFX12__
     // gfx12: per-lane scalar accumulation via v_dot4_f32_fp8_fp8
     float sum[N][YTILE] = {};
   #else
@@ -2123,7 +2128,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         for (uint32_t n = 0; n < N; n++) {
-  #ifdef __GFX12__
+  #ifdef __HIP__GFX12__
           // gfx12: 4 x dot4 per A_CHUNK=16 bytes (4 FP8 per dot4)
           for (int y = 0; y < YTILE; ++y) {
     #pragma unroll
@@ -2147,7 +2152,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     }
 
     // Final reduction
-  #ifdef __GFX12__
+  #ifdef __HIP__GFX12__
     // gfx12 wave32: DPP row_shr within 16-lane rows + cross-row shuffle
     for (int n = 0; n < N; n++) {
       for (int y = 0; y < YTILE; y++) {
@@ -2185,7 +2190,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #endif
 
     const bool writeback_lane =
-  #ifdef __GFX12__
+  #ifdef __HIP__GFX12__
         threadIdx.x == (THRDS - 1);
   #else
         threadIdx.x == 0;
@@ -2201,7 +2206,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           if (y + m >= M) break;  // To avoid mem access fault.
-  #ifdef __GFX12__
+  #ifdef __HIP__GFX12__
           float result = sum[n][y] * sA * sB;
   #else
           float result = sum[n][y][0] * sA * sB;
@@ -2219,7 +2224,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     m += CuCount * _WvPrGrp * YTILE;
   }
 }
-#else   // !defined(__HIP__MI3XX__) && !defined(__GFX12__)
+#else   // !defined(__HIP__MI3XX__) && !defined(__HIP__GFX12__)
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void wvSplitKQ_hf_(const int K, const int Kap, const int Kbp,
@@ -2231,7 +2236,7 @@ __global__ void wvSplitKQ_hf_(const int K, const int Kap, const int Kbp,
                               const int CuCount) {
   UNREACHABLE_CODE
 }
-#endif  // defined(__HIP__MI3XX__) || defined(__GFX12__)
+#endif  // defined(__HIP__MI3XX__) || defined(__HIP__GFX12__)
 
 void wvSplitKQ(const at::Tensor& in_b, const at::Tensor& in_a,
                const std::optional<at::Tensor>& in_bias, at::Tensor& out_c,

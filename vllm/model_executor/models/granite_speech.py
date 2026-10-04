@@ -26,8 +26,9 @@
 
 import math
 from collections.abc import Iterable, Mapping
-from typing import Annotated
+from typing import Annotated, Literal
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -35,7 +36,6 @@ from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -852,14 +852,15 @@ class GraniteSpeechForConditionalGeneration(
     @classmethod
     def get_generation_prompt(
         cls,
-        stt_params: SpeechToTextParams,
+        audio: np.ndarray,
+        model_config: ModelConfig,
+        stt_config: SpeechToTextConfig,
+        language: str | None,
+        task_type: Literal["transcribe", "translate"],
+        request_prompt: str,
+        to_language: str | None,
     ) -> PromptType:
         """Get the generation prompt to be used for transcription requests."""
-        audio = stt_params.audio
-        model_config = stt_params.model_config
-        task_type = stt_params.task_type
-        to_language = stt_params.to_language
-
         # Audio placeholders don't use an index, so value doesn't matter
         audio_tok = cls.get_placeholder_str("audio", 0)
 

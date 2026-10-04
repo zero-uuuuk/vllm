@@ -16,7 +16,6 @@ from torch.fx._graph_pickler import GraphPickler, Options
 from torch.utils import _pytree as pytree
 
 import vllm.envs as envs
-from vllm.compilation.codegen import compile_execution_fn
 from vllm.compilation.compiler_interface import get_inductor_factors
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -177,7 +176,7 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
 
     def __init__(
         self,
-        graph_module: torch.fx.GraphModule | bytes,
+        graph_module: torch.fx.GraphModule,
         example_inputs: Sequence[Any],
         prefix: str,
         optimized_call: Callable[..., Any],
@@ -185,9 +184,8 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         vllm_backend: Any | None = None,
         sym_tensor_indices: list[int] | None = None,
         aot_autograd_config: dict[str, Any] | None = None,
-        execution_code: str | None = None,
-        submod_names: list[str] | None = None,
     ) -> None:
+        assert isinstance(graph_module, torch.fx.GraphModule)
         self.graph_module = graph_module
         self.example_inputs = example_inputs
         self.prefix = prefix
@@ -196,8 +194,6 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         self.shape_env = None
         self.vllm_backend = vllm_backend
         self.sym_tensor_indices = sym_tensor_indices
-        self.execution_code = execution_code
-        self.submod_names = submod_names
         self._fake_mode: Any | None = None
 
         import torch._functorch.config as functorch_config
@@ -302,6 +298,10 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         state = pickle.loads(data)
         fake_mode = FakeTensorMode(shape_env=ShapeEnv())
 
+        state["graph_module"] = cls.deserialize_graph_module(
+            state["graph_module"], fake_mode
+        )
+        state["graph_module"].recompile()
         state["example_inputs"] = GraphPickler.loads(state["example_inputs"], fake_mode)
 
         standalone_compile_artifacts = state.pop("standalone_compile_artifacts", None)
@@ -327,7 +327,6 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
                     vllm_config=get_current_vllm_config(),
                     sym_shape_indices_map=sym_shape_indices_map,
                     returns_tuple_map=returns_tuple_map,
-                    fake_mode=fake_mode,
                 )
 
             logger.info(
@@ -338,11 +337,6 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
             )
 
             return fn
-
-        state["graph_module"] = cls.deserialize_graph_module(
-            state["graph_module"], fake_mode
-        )
-        state["graph_module"].recompile()
 
         # Fall back to standard VllmBackend.
         # Use a lazy closure: the backend needs traced_files for cache
@@ -412,7 +406,6 @@ def reconstruct_serializable_fn_from_mega_artifact(
     vllm_config: VllmConfig,
     sym_shape_indices_map: dict[str, list[int]],
     returns_tuple_map: dict[str, bool],
-    fake_mode: FakeTensorMode,
 ) -> "VllmSerializableFunction":
     """Construct a VllmSerializableFunction from cached inductor artifacts.
 
@@ -455,11 +448,12 @@ def reconstruct_serializable_fn_from_mega_artifact(
 
     prefix = state["prefix"]
     is_encoder = state.get("is_encoder", False)
+    split_gm = state["graph_module"]
     compilation_config = vllm_config.compilation_config
 
     standalone_compile_artifacts.load_all()
 
-    piecewise_submod_names = standalone_compile_artifacts.submodule_names()
+    submod_names = standalone_compile_artifacts.submodule_names()
     compiled_callables: dict[str, dict[str, Callable[..., Any]]] = {}
 
     for cache_key in standalone_compile_artifacts.submodule_bytes:
@@ -478,17 +472,14 @@ def reconstruct_serializable_fn_from_mega_artifact(
     )
 
     # spot check that cached submodules exist in the graph structure
-    # if an old cache is used, this will fail but that's fine because
-    # we will just try this error and re-generate the new cache.
-    graph_children = set(state["submod_names"])
-    missing = set(piecewise_submod_names) - graph_children
+    graph_children = {name for name, _ in split_gm.named_children()}
+    missing = set(submod_names) - graph_children
     assert not missing, (
         f"artifacts reference submodules not in graph: {missing}. "
         f"graph has: {sorted(graph_children)}"
     )
 
-    submod_callables = {}
-    for i, submod_name in enumerate(piecewise_submod_names):
+    for i, submod_name in enumerate(submod_names):
         assert submod_name in sym_shape_indices_map and submod_name in returns_tuple_map
 
         sym_shape_indices = sym_shape_indices_map[submod_name]
@@ -499,7 +490,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
             graph=None,  # not needed for cached artifacts
             vllm_config=vllm_config,
             piecewise_compile_index=i,
-            total_piecewise_compiles=len(piecewise_submod_names),
+            total_piecewise_compiles=len(submod_names),
             sym_shape_indices=sym_shape_indices,
             vllm_backend=vllm_backend,
             returns_tuple=returns_tuple,
@@ -507,7 +498,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
         )
 
         is_first = i == 0
-        is_last = i == len(piecewise_submod_names) - 1
+        is_last = i == len(submod_names) - 1
         wrapped_backend = wrap_with_cudagraph_if_needed(
             piecewise_backend,
             vllm_config,
@@ -516,25 +507,10 @@ def reconstruct_serializable_fn_from_mega_artifact(
             is_last,
         )
 
-        submod_callables[submod_name] = wrapped_backend
+        split_gm.__dict__[submod_name] = wrapped_backend
         logger.debug(
             "Replaced submodule %s with piecewise backend from cache",
             submod_name,
-        )
-
-    # Use codegen'd execution code if available, fall back to split_gm
-    execution_code = state.get("execution_code")
-    submod_names = state.get("submod_names")
-    if execution_code is not None and submod_names is not None:
-        runtime_callable = compile_execution_fn(
-            execution_code, submod_callables, submod_names
-        )
-    else:
-        logger.warning(
-            "No execution code found, falling back to graph module execution."
-        )
-        runtime_callable = GraphPickler.loads(
-            state["graph_module"], fake_mode=fake_mode
         )
 
     if compilation_config.cudagraph_copy_inputs:
@@ -545,11 +521,9 @@ def reconstruct_serializable_fn_from_mega_artifact(
             )
             for idx in sym_tensor_indices
         ]
-        optimized_call = make_copy_and_call(
-            sym_tensor_indices, input_buffers, runtime_callable
-        )
+        optimized_call = make_copy_and_call(sym_tensor_indices, input_buffers, split_gm)
     else:
-        optimized_call = runtime_callable
+        optimized_call = split_gm
 
     fn = VllmSerializableFunction(
         **state,

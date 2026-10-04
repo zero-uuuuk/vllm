@@ -110,22 +110,13 @@ class QuantizationConfig(ABC):
 
     @classmethod
     def override_quantization_method(
-        cls,
-        hf_quant_cfg: dict[str, Any],
-        user_quant: str | None,
-        hf_config: Any = None,
+        cls, hf_quant_cfg, user_quant
     ) -> QuantizationMethods | None:
         """
         Detects if this quantization method can support a given checkpoint
         format by overriding the user specified quantization method --
         this method should only be overwritten by subclasses in exceptional
-        circumstances.
-
-        Args:
-            hf_quant_cfg: The checkpoint's quantization config dict.
-            user_quant: The user-specified quantization method string.
-            hf_config: The HuggingFace model config object (e.g. for
-                model_type checks). May be None if not available.
+        circumstances
         """
         return None
 

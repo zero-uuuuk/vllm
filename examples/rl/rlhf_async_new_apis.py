@@ -131,9 +131,16 @@ class TrainModel:
         from vllm.model_executor.layers.batch_invariant import (
             init_batch_invariance,
         )
+        from vllm.platforms import current_platform
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         # need to init all env vars for batch invariance which affect nccl ops
-        init_batch_invariance()
+        attn_backend = (
+            AttentionBackendEnum.TRITON_ATTN
+            if current_platform.is_rocm()
+            else AttentionBackendEnum.FLASH_ATTN
+        )
+        init_batch_invariance(attn_backend)
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name, dtype=torch.bfloat16

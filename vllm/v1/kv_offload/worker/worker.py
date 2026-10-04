@@ -69,10 +69,6 @@ class OffloadingHandler(ABC):
             job_ids: The set of job IDs to wait for.
         """
 
-    def shutdown(self) -> None:
-        """Shutdown the handler and release any resources."""
-        return
-
 
 class OffloadingWorker:
     """
@@ -170,7 +166,3 @@ class OffloadingWorker:
         """
         for handler in self.handlers:
             handler.wait(job_ids)
-
-    def shutdown(self) -> None:
-        for handler in self.handlers:
-            handler.shutdown()

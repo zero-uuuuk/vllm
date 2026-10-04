@@ -3,7 +3,7 @@
 
 # Supports FP-Quant compression, see https://arxiv.org/abs/2509.23202
 
-from typing import Any, Literal, cast
+from typing import Any
 
 import torch
 from torch.nn.parameter import Parameter
@@ -251,11 +251,7 @@ class FPQuantLinearMethod(LinearMethodBase):
 def fused_quantize_mx(
     x_flat: torch.Tensor, hadamard_matrix: torch.Tensor, forward_method: str
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return fusedQuantizeMx(
-        x_flat,
-        hadamard_matrix,
-        method=cast(Literal["quest", "abs_max"], forward_method),
-    )
+    return fusedQuantizeMx(x_flat, hadamard_matrix, method=forward_method)
 
 
 def fused_quantize_mx_fake(x_flat, hadamard_matrix, forward_method):

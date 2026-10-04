@@ -34,10 +34,7 @@ def _run_vllm(vllm_runner):
             mode=CompilationMode.VLLM_COMPILE,
             cudagraph_mode=CUDAGraphMode.NONE,
         ),
-        # Phi-tiny-MoE uses SWA, whose admission cap is `cdiv(L, block_size) + 1`
-        # at default block_size=16 — i.e. 17 blocks for max_model_len=256. Use
-        # 32 for headroom.
-        num_gpu_blocks_override=32,
+        num_gpu_blocks_override=8,
     ):
         pass
 
@@ -59,7 +56,6 @@ def _cold_start(vllm_runner):
 def test_moe_startup(monkeypatch, vllm_runner, fresh_vllm_cache, mega_aot_artifact):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", mega_aot_artifact)
-    monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "skip")
 
     # Cold start in a forked child (must fork before CUDA init).
     # This model has 32 identical transformer layers which produce
@@ -139,9 +135,10 @@ MODEL_SPECS = [
             model="deepseek-ai/DeepSeek-V3.2",
             hf_overrides=_SMALL_MOE_OVERRIDES,
             cold_artifacts_saved=4,
-            # https://github.com/vllm-project/vllm/issues/38051
-            warm_artifacts_saved=0 if is_torch_equal_or_newer("2.12.0") else 4,
-            warm_artifacts_loaded=4 if is_torch_equal_or_newer("2.12.0") else 0,
+            # TODO: https://github.com/vllm-project/vllm/issues/38051
+            # We shouldn't be saving any artifacts on warm start.
+            warm_artifacts_saved=4,
+            warm_artifacts_loaded=0,
         ),
         id="deepseek_v3.2",
     ),
@@ -150,9 +147,10 @@ MODEL_SPECS = [
             model="moonshotai/Kimi-K2.5",
             hf_overrides={"text_config": _SMALL_MOE_OVERRIDES},
             cold_artifacts_saved=4,
-            # https://github.com/vllm-project/vllm/issues/38051
-            warm_artifacts_saved=0 if is_torch_equal_or_newer("2.12.0") else 4,
-            warm_artifacts_loaded=4 if is_torch_equal_or_newer("2.12.0") else 0,
+            # TODO: https://github.com/vllm-project/vllm/issues/38051
+            # We shouldn't be saving any artifacts on warm start.
+            warm_artifacts_saved=4,
+            warm_artifacts_loaded=0,
         ),
         id="kimi_k2.5",
     ),
@@ -193,7 +191,7 @@ def _run_model(vllm_runner, spec: ModelStartupSpec):
             cudagraph_mode=CUDAGraphMode.NONE,
             pass_config=PassConfig(fuse_allreduce_rms=False),
         ),
-        num_gpu_blocks_override=16,
+        num_gpu_blocks_override=8,
     ):
         pass
 
@@ -239,7 +237,6 @@ def _cold_start_model(vllm_runner, spec: ModelStartupSpec):
 @fork_new_process_for_each_test
 def test_model_startup(monkeypatch, vllm_runner, fresh_vllm_cache, spec):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "skip")
 
     # Cold start in a forked child (must fork before CUDA init).
     ctx = mp.get_context("fork")

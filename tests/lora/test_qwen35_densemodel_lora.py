@@ -312,9 +312,7 @@ def _assert_qwen35_text_vl_and_mixed_lora(
 
 
 @create_new_process_for_each_test()
-def test_qwen35_text_lora(
-    qwen35_text_lora_files, qwen35_vl_lora_files, maybe_enable_lora_dual_stream
-):
+def test_qwen35_text_lora(qwen35_text_lora_files, qwen35_vl_lora_files):
     llm = vllm.LLM(
         model=MODEL_PATH,
         max_model_len=4096,
@@ -337,9 +335,7 @@ def test_qwen35_text_lora(
 
 
 @multi_gpu_test(num_gpus=4)
-def test_qwen35_text_lora_tp4(
-    qwen35_text_lora_files, qwen35_vl_lora_files, maybe_enable_lora_dual_stream
-):
+def test_qwen35_text_lora_tp4(qwen35_text_lora_files, qwen35_vl_lora_files):
     llm = vllm.LLM(
         model=MODEL_PATH,
         max_model_len=4096,

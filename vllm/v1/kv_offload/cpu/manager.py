@@ -3,13 +3,12 @@
 from collections.abc import Iterable
 from typing import Literal
 
+from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_offload.abstract import (
     LoadStoreSpec,
     OffloadingEvent,
     OffloadingManager,
-    OffloadKey,
     PrepareStoreOutput,
-    ReqContext,
 )
 from vllm.v1.kv_offload.cpu.policies.abstract import BlockStatus, CachePolicy
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
@@ -34,10 +33,12 @@ class CPUOffloadingManager(OffloadingManager):
 
     def __init__(
         self,
+        block_size: int,
         num_blocks: int,
         cache_policy: Literal["lru", "arc"] = "lru",
         enable_events: bool = False,
     ):
+        self.block_size: int = block_size
         self.medium: str = CPULoadStoreSpec.medium()
         self._num_blocks: int = num_blocks
         self._num_allocated_blocks: int = 0
@@ -56,9 +57,11 @@ class CPUOffloadingManager(OffloadingManager):
     def _get_num_free_blocks(self) -> int:
         return len(self._free_list) + self._num_blocks - self._num_allocated_blocks
 
-    def _allocate_blocks(self, keys: list[OffloadKey]) -> list[BlockStatus]:
-        num_fresh = min(len(keys), self._num_blocks - self._num_allocated_blocks)
-        num_reused = len(keys) - num_fresh
+    def _allocate_blocks(self, block_hashes: list[BlockHash]) -> list[BlockStatus]:
+        num_fresh = min(
+            len(block_hashes), self._num_blocks - self._num_allocated_blocks
+        )
+        num_reused = len(block_hashes) - num_fresh
         assert len(self._free_list) >= num_reused
 
         # allocate fresh blocks
@@ -77,118 +80,123 @@ class CPUOffloadingManager(OffloadingManager):
 
     def _get_load_store_spec(
         self,
-        keys: Iterable[OffloadKey],
+        block_hashes: Iterable[BlockHash],
         blocks: Iterable[BlockStatus],
     ) -> CPULoadStoreSpec:
         return CPULoadStoreSpec([block.block_id for block in blocks])
 
     # --- OffloadingManager interface ---
 
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
-        block = self._policy.get(key)
-        return block is not None and block.is_ready
+    def lookup(self, block_hashes: Iterable[BlockHash]) -> int | None:
+        hit_count = 0
+        for block_hash in block_hashes:
+            block = self._policy.get(block_hash)
+            if block is None or not block.is_ready:
+                break
+            hit_count += 1
+        return hit_count
 
-    def prepare_load(
-        self,
-        keys: Iterable[OffloadKey],
-        req_context: ReqContext,
-    ) -> LoadStoreSpec:
+    def prepare_load(self, block_hashes: Iterable[BlockHash]) -> LoadStoreSpec:
         blocks = []
-        for key in keys:
-            block = self._policy.get(key)
-            assert block is not None, f"Block {key!r} not found in cache"
-            assert block.is_ready, f"Block {key!r} is not ready for reading"
+        for block_hash in block_hashes:
+            block = self._policy.get(block_hash)
+            assert block is not None, f"Block {block_hash!r} not found in cache"
+            assert block.is_ready, f"Block {block_hash!r} is not ready for reading"
             block.ref_cnt += 1
             blocks.append(block)
-        return self._get_load_store_spec(keys, blocks)
+        return self._get_load_store_spec(block_hashes, blocks)
 
-    def touch(self, keys: Iterable[OffloadKey]) -> None:
-        self._policy.touch(keys)
+    def touch(self, block_hashes: Iterable[BlockHash]) -> None:
+        self._policy.touch(block_hashes)
 
-    def complete_load(self, keys: Iterable[OffloadKey]) -> None:
-        for key in keys:
-            block = self._policy.get(key)
-            assert block is not None, f"Block {key!r} not found"
-            assert block.ref_cnt > 0, f"Block {key!r} ref_cnt is already 0"
+    def complete_load(self, block_hashes: Iterable[BlockHash]) -> None:
+        for block_hash in block_hashes:
+            block = self._policy.get(block_hash)
+            assert block is not None, f"Block {block_hash!r} not found"
+            assert block.ref_cnt > 0, f"Block {block_hash!r} ref_cnt is already 0"
             block.ref_cnt -= 1
 
     def prepare_store(
-        self,
-        keys: Iterable[OffloadKey],
-        req_context: ReqContext,
+        self, block_hashes: Iterable[BlockHash]
     ) -> PrepareStoreOutput | None:
-        keys_list = list(keys)
+        block_hashes_list = list(block_hashes)
 
         # filter out blocks that are already stored
-        keys_to_store = [k for k in keys_list if self._policy.get(k) is None]
+        block_hashes_to_store = [
+            bh for bh in block_hashes_list if self._policy.get(bh) is None
+        ]
 
-        if not keys_to_store:
+        if not block_hashes_to_store:
             return PrepareStoreOutput(
-                keys_to_store=[],
+                block_hashes_to_store=[],
                 store_spec=self._get_load_store_spec([], []),
-                evicted_keys=[],
+                block_hashes_evicted=[],
             )
 
-        num_blocks_to_evict = len(keys_to_store) - self._get_num_free_blocks()
+        num_blocks_to_evict = len(block_hashes_to_store) - self._get_num_free_blocks()
 
-        to_evict: list[OffloadKey] = []
+        to_evict: list[BlockHash] = []
         if num_blocks_to_evict > 0:
             # Blocks from the original input are excluded from eviction candidates:
             # a block that was already stored must remain in the cache after this call.
-            protected = set(keys_list)
+            protected = set(block_hashes_list)
             evicted = self._policy.evict(num_blocks_to_evict, protected)
             if evicted is None:
                 return None
-            for key, block in evicted:
+            for block_hash, block in evicted:
                 self._free_block(block)
-                to_evict.append(key)
+                to_evict.append(block_hash)
 
         if to_evict and self.events is not None:
             self.events.append(
                 OffloadingEvent(
-                    keys=to_evict,
+                    block_hashes=to_evict,
+                    block_size=self.block_size,
                     medium=self.medium,
                     removed=True,
                 )
             )
 
-        blocks = self._allocate_blocks(keys_to_store)
-        assert len(blocks) == len(keys_to_store), (
+        blocks = self._allocate_blocks(block_hashes_to_store)
+        assert len(blocks) == len(block_hashes_to_store), (
             "Block pool did not allocate the expected number of blocks"
         )
 
-        for key, block in zip(keys_to_store, blocks):
-            self._policy.insert(key, block)
+        for block_hash, block in zip(block_hashes_to_store, blocks):
+            self._policy.insert(block_hash, block)
 
         # build store specs for allocated blocks
-        store_spec = self._get_load_store_spec(keys_to_store, blocks)
+        store_spec = self._get_load_store_spec(block_hashes_to_store, blocks)
 
         return PrepareStoreOutput(
-            keys_to_store=keys_to_store,
+            block_hashes_to_store=block_hashes_to_store,
             store_spec=store_spec,
-            evicted_keys=to_evict,
+            block_hashes_evicted=to_evict,
         )
 
-    def complete_store(self, keys: Iterable[OffloadKey], success: bool = True) -> None:
-        stored_keys: list[OffloadKey] = []
+    def complete_store(
+        self, block_hashes: Iterable[BlockHash], success: bool = True
+    ) -> None:
+        stored_block_hashes: list[BlockHash] = []
 
         if success:
-            for key in keys:
-                block = self._policy.get(key)
+            for block_hash in block_hashes:
+                block = self._policy.get(block_hash)
                 if block is not None and not block.is_ready:
                     block.ref_cnt = 0
-                    stored_keys.append(key)
+                    stored_block_hashes.append(block_hash)
         else:
-            for key in keys:
-                block = self._policy.get(key)
+            for block_hash in block_hashes:
+                block = self._policy.get(block_hash)
                 if block is not None and not block.is_ready:
-                    self._policy.remove(key)
+                    self._policy.remove(block_hash)
                     self._free_block(block)
 
-        if stored_keys and self.events is not None:
+        if stored_block_hashes and self.events is not None:
             self.events.append(
                 OffloadingEvent(
-                    keys=stored_keys,
+                    block_hashes=stored_block_hashes,
+                    block_size=self.block_size,
                     medium=self.medium,
                     removed=False,
                 )

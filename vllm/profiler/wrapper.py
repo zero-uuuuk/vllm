@@ -63,7 +63,7 @@ class WorkerProfiler(ABC):
         """Call _stop with error handling but no safeguards."""
         try:
             self._stop()
-            logger.info_once("Profiler stopped successfully.")
+            logger.info_once("Profiler stopped successfully.", scope="local")
         except Exception as e:
             logger.warning("Failed to stop profiler: %s", e)
         self._running = False  # Always mark as not running, assume stop worked
@@ -93,7 +93,7 @@ class WorkerProfiler(ABC):
             and self._delay_iters > 0
             and self._active_iteration_count == self._delay_iters
         ):
-            logger.info_once("Starting profiler after delay...")
+            logger.info_once("Starting profiler after delay...", scope="local")
             self._call_start()
 
         # Call profiler step for schedule-based profiling
@@ -109,7 +109,9 @@ class WorkerProfiler(ABC):
             # Automatically stop the profiler after max iters
             # will be marked as not running, but leave as active so that stop
             # can clean up properly
-            logger.info_once("Max profiling iterations reached. Stopping profiler...")
+            logger.info_once(
+                "Max profiling iterations reached. Stopping profiler...", scope="local"
+            )
             self._call_stop()
             return
 
@@ -139,7 +141,7 @@ class WorkerProfiler(ABC):
 
     def shutdown(self) -> None:
         """Ensure profiler is stopped when shutting down."""
-        logger.info_once("Shutting down profiler")
+        logger.info_once("Shutting down profiler", scope="local")
         if self._running:
             self.stop()
 
@@ -174,6 +176,7 @@ class TorchProfilerWrapper(WorkerProfiler):
             logger.info_once(
                 "Torch profiling enabled. Traces will be saved to: %s",
                 torch_profiler_trace_dir,
+                scope="local",
             )
             logger.debug(
                 "Profiler config: record_shapes=%s,"
@@ -213,6 +216,7 @@ class TorchProfilerWrapper(WorkerProfiler):
                     profiler_config.wait_iterations,
                     profiler_config.warmup_iterations,
                     profiler_config.active_iterations,
+                    scope="local",
                 )
 
         self.profiler = torch.profiler.profile(
@@ -236,28 +240,6 @@ class TorchProfilerWrapper(WorkerProfiler):
             0,
         )
 
-    def _build_profiler_table(
-        self,
-        sort_key: str,
-        row_limit: int | None = None,
-    ) -> str:
-        if row_limit is None:  # use profiler default row limit of 100
-            return self.profiler.key_averages().table(sort_by=sort_key)
-        return self.profiler.key_averages().table(
-            sort_by=sort_key,
-            row_limit=row_limit,
-        )
-
-    def _write_profiler_table(self, rank: int, table: str) -> None:
-        profiler_dir = self.profiler_config.torch_profiler_dir
-
-        # Skip file write for URI paths (gs://, s3://, etc.)
-        # as standard file I/O doesn't work with URI schemes
-        if not _is_uri_path(profiler_dir):
-            profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
-            with open(profiler_out_file, "w") as f:
-                print(table, file=f)
-
     @override
     def _start(self) -> None:
         self.profiler.start()
@@ -269,22 +251,26 @@ class TorchProfilerWrapper(WorkerProfiler):
         profiler_config = self.profiler_config
         rank = self.local_rank
         if profiler_config.torch_profiler_dump_cuda_time_total:
-            table = self._build_profiler_table(sort_key="self_cuda_time_total")
-            self._write_profiler_table(rank, table)
+            profiler_dir = profiler_config.torch_profiler_dir
+            sort_key = "self_cuda_time_total"
+            table = self.profiler.key_averages().table(sort_by=sort_key)
+
+            # Skip file write for URI paths (gs://, s3://, etc.)
+            # as standard file I/O doesn't work with URI schemes
+            if not _is_uri_path(profiler_dir):
+                profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
+                with open(profiler_out_file, "w") as f:
+                    print(table, file=f)
 
             # only print profiler results on rank 0
             if rank == 0:
                 print(table)
-
-        if self.dump_cpu_time_total:
-            table = self._build_profiler_table(
-                sort_key="self_cpu_time_total", row_limit=50
+        if self.dump_cpu_time_total and rank == 0:
+            logger.info(
+                self.profiler.key_averages().table(
+                    sort_by="self_cpu_time_total", row_limit=50
+                )
             )
-            self._write_profiler_table(rank, table)
-
-            # only print profiler results on rank 0
-            if rank == 0:
-                print(table)
 
     @override
     def _profiler_step(self) -> bool:

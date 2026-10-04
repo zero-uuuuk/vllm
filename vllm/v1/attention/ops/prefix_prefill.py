@@ -4,8 +4,6 @@
 # The kernels in this file are adapted from LightLLM's context_attention_fwd:
 # https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
 
-from typing import Any
-
 import torch
 
 from vllm.platforms import current_platform
@@ -89,7 +87,6 @@ def _fwd_kernel(
     SKIP_DECODE: tl.constexpr,
     USE_SINKS: tl.constexpr,
     USE_FP8: tl.constexpr,
-    CAUSAL: tl.constexpr = True,
     MAX_Q_LEN: tl.constexpr = 0,
     MAX_CTX_LEN: tl.constexpr = 0,
     FP8_MIN: tl.constexpr = float8_info.min,
@@ -284,17 +281,10 @@ def _fwd_kernel(
     # block_mask is 0 when we're already past the current query length
     block_mask = tl.where(block_start_loc < cur_batch_query_len, 1, 0)
 
-    # compute query against itself (causal among queries by default;
-    # CAUSAL=False for bidirectional attention over query tokens, e.g. DFlash.)
-    if CAUSAL:
-        key_range_upper = block_mask * (start_m + 1) * BLOCK_M
-    else:
-        q_len_pad = (cur_batch_query_len + BLOCK_N - 1) // BLOCK_N * BLOCK_N
-        key_range_upper = block_mask * q_len_pad
-
+    # compute query against itself (with causal mask)
     for start_n in tl.range(
         0,
-        key_range_upper,
+        block_mask * (start_m + 1) * BLOCK_M,
         BLOCK_N,
         loop_unroll_factor=num_unroll_request,
     ):
@@ -310,17 +300,14 @@ def _fwd_kernel(
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk = tl.dot(q, k, acc=qk, input_precision=IN_PRECISION)
         qk *= sm_scale
-
-        valid_kv = (start_n + offs_n[None, :]) < cur_batch_query_len
-        if CAUSAL:
-            attn_mask = valid_kv & (offs_m[:, None] >= (start_n + offs_n[None, :]))
-        else:
-            attn_mask = valid_kv
+        # apply causal mask
+        qk = tl.where(offs_m[:, None] >= (start_n + offs_n[None, :]), qk, float("-inf"))
         if SLIDING_WINDOW > 0:
-            attn_mask = attn_mask & (
-                offs_m[:, None] - (start_n + offs_n[None, :]) < SLIDING_WINDOW
+            qk = tl.where(
+                offs_m[:, None] - (start_n + offs_n[None, :]) < SLIDING_WINDOW,
+                qk,
+                float("-inf"),
             )
-        qk = tl.where(attn_mask, qk, float("-inf"))
 
         # compute running maximum
         m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
@@ -667,7 +654,6 @@ def context_attention_fwd(
     fp8_out_scale=None,
     sinks=None,
     is_block_table_ptr: bool = False,
-    causal: bool = True,
 ):
     q_dtype_is_f32 = q.dtype is torch.float32
 
@@ -734,7 +720,6 @@ def context_attention_fwd(
         processed_b_loc = b_loc.to(torch.int32)
 
     if alibi_slopes is not None:
-        assert causal, "Non-causal prefix attention is not supported with alibi"
         assert sinks is None, "Sinks arg is not supported with alibi"
         assert fp8_out_scale is None, "FP8 output not supported with alibi"
         # need to reduce num. blocks when using fp32
@@ -795,7 +780,7 @@ def context_attention_fwd(
         return
 
     max_seq_len = 0 if max_seq_len is None else max_seq_len
-    extra_kargs: dict[str, Any] = {}
+    extra_kargs = {}
     if current_platform.is_rocm():
         extra_kargs = {}
 
@@ -872,7 +857,6 @@ def context_attention_fwd(
         num_warps=4,
         num_stages=1,
         USE_SINKS=sinks is not None,
-        CAUSAL=causal,
         **extra_kargs,
     )
     return

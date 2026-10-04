@@ -109,7 +109,6 @@ class KVCacheManager:
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         hash_block_size: int,
-        max_num_batched_tokens: int | None = None,
         enable_caching: bool = True,
         use_eagle: bool = False,
         log_stats: bool = False,
@@ -119,11 +118,6 @@ class KVCacheManager:
         metrics_collector: KVCacheMetricsCollector | None = None,
     ) -> None:
         self.max_model_len = max_model_len
-        # When unset, fall back to `max_model_len` so the recycling-aware cap
-        # collapses to the prior (uncapped) admission behavior. The scheduler
-        # always supplies the real value at runtime.
-        if max_num_batched_tokens is None:
-            max_num_batched_tokens = max_model_len
 
         self.enable_caching = enable_caching
         self.use_eagle = use_eagle
@@ -137,7 +131,6 @@ class KVCacheManager:
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
-            max_num_batched_tokens=max_num_batched_tokens,
             use_eagle=self.use_eagle,
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
@@ -406,7 +399,6 @@ class KVCacheManager:
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
-                application_id=request.application_id,
             )
 
         new_blocks = self.coordinator.allocate_new_blocks(
@@ -414,7 +406,6 @@ class KVCacheManager:
             num_tokens_need_slot,
             num_tokens_main_model,
             num_encoder_tokens,
-            application_id=request.application_id,
         )
 
         # P/D: delay caching blocks if we have to recv from

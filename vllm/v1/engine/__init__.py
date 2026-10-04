@@ -4,7 +4,6 @@
 import enum
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Any, Literal
 
 import msgspec
@@ -15,7 +14,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.v1.metrics.stats import PrefillStats, SchedulerStats
+from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.serial_utils import UtilityResult
 
@@ -64,19 +63,6 @@ class FinishReason(enum.IntEnum):
         return FINISH_REASON_STRINGS[self.value]
 
 
-@dataclass
-class EngineCoreReadyResponse:
-    """Sent from EngineCore to each frontend at the end of engine startup.
-
-    Contains post-initialization config that may differ from the original
-    values (e.g. max_model_len after KV cache auto-fitting).
-    """
-
-    max_model_len: int
-    num_gpu_blocks: int
-    dp_stats_address: str | None
-
-
 class EngineCoreRequest(
     msgspec.Struct,
     array_like=True,  # type: ignore[call-arg]
@@ -114,7 +100,6 @@ class EngineCoreRequest(
     external_req_id: str | None = None
 
     reasoning_ended: bool | None = None
-    reasoning_parser_kwargs: dict[str, Any] | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
@@ -172,9 +157,10 @@ class EngineCoreOutput(
     kv_transfer_params: dict[str, Any] | None = None
 
     trace_headers: Mapping[str, str] | None = None
-
-    prefill_stats: PrefillStats | None = None
-
+    # The number of tokens with prefix cache hits (local + external).
+    num_cached_tokens: int = 0
+    # The number of tokens computed remotely (original count from connector).
+    num_external_computed_tokens: int = 0
     routed_experts: np.ndarray | None = None
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.

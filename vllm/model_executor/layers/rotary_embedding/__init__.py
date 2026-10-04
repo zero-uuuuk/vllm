@@ -7,10 +7,7 @@ from typing import Any
 import torch
 
 from .base import RotaryEmbedding
-from .deepseek_scaling_rope import (
-    DeepseekScalingRotaryEmbedding,
-    DeepseekV4ScalingRotaryEmbedding,
-)
+from .deepseek_scaling_rope import DeepseekScalingRotaryEmbedding
 from .dual_chunk_rope import DualChunkRotaryEmbedding
 from .dynamic_ntk_alpha_rope import DynamicNTKAlphaRotaryEmbedding
 from .dynamic_ntk_scaling_rope import DynamicNTKScalingRotaryEmbedding
@@ -63,13 +60,11 @@ def get_rope(
     rope_parameters = rope_parameters or {}
     base = rope_parameters.get("rope_theta", 10000)
     scaling_type = rope_parameters.get("rope_type", "default")
-    if rotary_dim := rope_parameters.get("rope_dim", None):
-        pass
-    else:
-        partial_rotary_factor = rope_parameters.get("partial_rotary_factor", 1.0)
-        if partial_rotary_factor <= 0.0 or partial_rotary_factor > 1.0:
-            raise ValueError(f"{partial_rotary_factor=} must be between 0.0 and 1.0")
-        rotary_dim = int(head_size * partial_rotary_factor)
+    partial_rotary_factor = rope_parameters.get("partial_rotary_factor", 1.0)
+
+    if partial_rotary_factor <= 0.0 or partial_rotary_factor > 1.0:
+        raise ValueError(f"{partial_rotary_factor=} must be between 0.0 and 1.0")
+    rotary_dim = int(head_size * partial_rotary_factor)
 
     key = (
         head_size,
@@ -294,11 +289,7 @@ def get_rope(
                 "mscale_all_dim",
             )
         }
-        if rope_parameters.get("is_deepseek_v4", False):
-            cls = DeepseekV4ScalingRotaryEmbedding
-        else:
-            cls = DeepseekScalingRotaryEmbedding
-        rotary_emb = cls(
+        rotary_emb = DeepseekScalingRotaryEmbedding(
             head_size,
             rotary_dim,
             original_max_position,

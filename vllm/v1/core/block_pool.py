@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -11,6 +12,7 @@ from vllm.distributed.kv_events import (
     KVCacheEvent,
 )
 from vllm.logger import init_logger
+from vllm.v1.core.eviction_policy import create_block_eviction_policy
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -127,6 +129,8 @@ class BlockHashToBlockMap:
         raise AssertionError(f"Invalid KV cache block type {type(blocks)}")
 
 
+# ############ KV Cache Manager ############
+# 블록의 hash, ref_cnt, free queue를 관리하고 선택된 정책에 상태를 전달한다.
 class BlockPool:
     """BlockPool that manages KVCacheBlocks.
     It provides methods to allocate, free and cache the kv cache blocks. The
@@ -175,6 +179,13 @@ class BlockPool:
         # avoid freeing it.
         self.null_block = self.free_block_queue.popleft()
         self.null_block.is_null = True
+
+        # 풀 생성 시 정책을 한 번 선택한다. 기본 LRU에는 별도 어댑터가 없다.
+        self.eviction_policy = create_block_eviction_policy(
+            self.blocks, self.free_block_queue, enable_caching
+        )
+        # 마지막 stats 수집 이후 실제로 재할당된 cached block의 선택 경로.
+        self._eviction_counts: defaultdict[str, int] = defaultdict(int)
 
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
@@ -269,6 +280,9 @@ class BlockPool:
                 block_hash, kv_cache_group_id
             )
             blk.block_hash = block_hash_with_group_id
+            if self.eviction_policy is not None:
+                # 새 full prefix가 캐시에 등록될 때 현재 요청을 owner로 기록한다.
+                self.eviction_policy.on_cached(blk, request)
             self.cached_block_hash_to_block.insert(block_hash_with_group_id, blk)
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
@@ -319,7 +333,9 @@ class BlockPool:
                 )
             )
 
-    def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
+    def get_new_blocks(
+        self, num_blocks: int, application_id: str | None = None
+    ) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
         Note that we do not check block cache in this function.
@@ -333,12 +349,33 @@ class BlockPool:
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        policy = self.eviction_policy
+        if policy is not None:
+            # Account each allocation before selecting the next victim in a batch.
+            ret = []
+            for _ in range(num_blocks):
+                block, reason = policy.take_free_block(application_id)
+                if self._maybe_evict_cached_block(block):
+                    assert reason is not None
+                    self._eviction_counts[reason] += 1
+                assert block.ref_cnt == 0
+                block.ref_cnt += 1
+                policy.on_allocate(block, application_id)
+                if self.metrics_collector:
+                    self.metrics_collector.on_block_allocated(block)
+                ret.append(block)
+            return ret
+        selected = [
+            (block, "lru") for block in self.free_block_queue.popleft_n(num_blocks)
+        ]
+        ret = [block for block, _ in selected]
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
-            for block in ret:
-                self._maybe_evict_cached_block(block)
+            for block, reason in selected:
+                if self._maybe_evict_cached_block(block):
+                    assert reason is not None
+                    self._eviction_counts[reason] += 1
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
                 if self.metrics_collector:
@@ -350,6 +387,12 @@ class BlockPool:
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
         return ret
+
+    def take_eviction_counts(self) -> dict[str, int]:
+        """Return and clear cached-block eviction counts since the last read."""
+        counts = dict(self._eviction_counts)
+        self._eviction_counts.clear()
+        return counts
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
         """
@@ -376,7 +419,14 @@ class BlockPool:
             # eviction is not needed
             return False
 
+        # 외부 eviction으로 free cached block이 uncached로 바뀌면 인덱스도 옮긴다.
+        was_free = block.ref_cnt == 0 and block.prev_free_block is not None
+        if self.eviction_policy is not None:
+            self.eviction_policy.on_evict(block)
         block.reset_hash()
+        block.owner = None
+        if was_free and self.eviction_policy is not None:
+            self.eviction_policy.on_free(block)
 
         if self.enable_kv_cache_events:
             self.kv_event_queue.append(
@@ -397,8 +447,9 @@ class BlockPool:
             blocks: A list of blocks to touch.
         """
         for block in blocks:
-            # ref_cnt=0 means this block is in the free list (i.e. eviction
-            # candidate), so remove it.
+            # 캐시 hit으로 free block을 다시 쓰면 회수 후보 목록에서 제외한다.
+            if not block.is_null and self.eviction_policy is not None:
+                self.eviction_policy.on_touch(block)
             if block.ref_cnt == 0 and not block.is_null:
                 self.free_block_queue.remove(block)
             block.ref_cnt += 1
@@ -417,9 +468,14 @@ class BlockPool:
         blocks_list = list(ordered_blocks)
         for block in blocks_list:
             block.ref_cnt -= 1
-        self.free_block_queue.append_n(
-            [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
-        )
+        freed = [
+            block for block in blocks_list if block.ref_cnt == 0 and not block.is_null
+        ]
+        # 참조 수가 0이 된 블록을 전역 queue와 정책 인덱스에 같은 순서로 넣는다.
+        self.free_block_queue.append_n(freed)
+        if self.eviction_policy is not None:
+            for block in freed:
+                self.eviction_policy.on_free(block)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
@@ -464,6 +520,11 @@ class BlockPool:
         # Remove all hashes from all blocks.
         for block in self.blocks:
             block.reset_hash()
+            block.owner = None
+
+        if self.eviction_policy is not None:
+            # 정책의 앱별 목록도 현재 free queue 상태로 다시 맞춘다.
+            self.eviction_policy.on_reset()
 
         if self.metrics_collector:
             self.metrics_collector.reset()

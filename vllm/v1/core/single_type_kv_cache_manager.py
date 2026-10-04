@@ -168,6 +168,7 @@ class SingleTypeKVCacheManager(ABC):
         new_computed_blocks: Sequence[KVCacheBlock],
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
+        application_id: str | None = None,
     ) -> None:
         """
         Add the new computed blocks to the request. This involves three steps:
@@ -229,14 +230,19 @@ class SingleTypeKVCacheManager(ABC):
         if num_external_computed_tokens > 0:
             # Allocate new blocks for external computed tokens.
             allocated_blocks = self.block_pool.get_new_blocks(
-                cdiv(num_total_computed_tokens, self.block_size) - len(req_blocks)
+                cdiv(num_total_computed_tokens, self.block_size) - len(req_blocks),
+                application_id,
             )
             req_blocks.extend(allocated_blocks)
             if type(self.kv_cache_spec) in (FullAttentionSpec, TQFullAttentionSpec):
                 self.new_block_ids.extend(b.block_id for b in allocated_blocks)
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_tokens_main_model: int,
+        application_id: str | None = None,
     ) -> list[KVCacheBlock]:
         """
         Allocate new blocks for the request to give it at least `num_tokens`
@@ -258,7 +264,7 @@ class SingleTypeKVCacheManager(ABC):
         if num_new_blocks <= 0:
             return []
         else:
-            new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+            new_blocks = self.block_pool.get_new_blocks(num_new_blocks, application_id)
             req_blocks.extend(new_blocks)
             if type(self.kv_cache_spec) in (FullAttentionSpec, TQFullAttentionSpec):
                 self.new_block_ids.extend(b.block_id for b in new_blocks)
@@ -952,7 +958,11 @@ class MambaManager(SingleTypeKVCacheManager):
             return num_new_blocks + num_evictable_computed_blocks
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_tokens_main_model: int,
+        application_id: str | None = None,
     ) -> list[KVCacheBlock]:
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if self.mamba_cache_mode != "align":
@@ -961,7 +971,7 @@ class MambaManager(SingleTypeKVCacheManager):
             if self.num_speculative_blocks > 0:
                 num_tokens += self.block_size * self.num_speculative_blocks
             return super().allocate_new_blocks(
-                request_id, num_tokens, num_tokens_main_model
+                request_id, num_tokens, num_tokens_main_model, application_id
             )
         else:
             # We don't allocate blocks for lookahead tokens in align mode, because if
@@ -1024,7 +1034,9 @@ class MambaManager(SingleTypeKVCacheManager):
                     assert num_new_blocks <= 1
                 else:
                     assert num_new_blocks <= self.num_speculative_blocks + 1
-                new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+                new_blocks = self.block_pool.get_new_blocks(
+                    num_new_blocks, application_id
+                )
                 req_blocks.extend(new_blocks)
                 self._allocated_block_reqs.add(request_id)
                 return req_blocks[prev_block_len:]
@@ -1069,6 +1081,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         new_computed_blocks: Sequence[KVCacheBlock],
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
+        application_id: str | None = None,
     ) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so  `new_computed_blocks` should always be empty.

@@ -121,6 +121,8 @@ class KVCacheBlock:
     # The hash key (block hash + group id) of the block, only available
     # when the block is full and cached.
     _block_hash: BlockHashWithGroupId | None = None
+    # 현재 캐시된 full prefix를 만든 앱. hash가 지워지면 owner도 함께 지운다.
+    owner: str | None = None
 
     # Used to construct a doubly linked list for free blocks.
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.

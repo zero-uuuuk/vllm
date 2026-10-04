@@ -52,7 +52,7 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import AttentionSpec, FullAttentionSpec, KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -646,7 +646,8 @@ class Scheduler(SchedulerInterface):
                     )
                     assert num_computed_tokens <= request.num_tokens
 
-                    # Track first scheduled prefill, not post-preemption repeat prefills
+                    # Record native prefill metrics, independently of eviction policy.
+                    # 내부 캐시 hit만 기록해 외부 KV와 재개 후 중복을 제외한다.
                     if request.prefill_stats is not None:
                         assert num_computed_tokens <= request.num_prompt_tokens
                         request.prefill_stats.set(
@@ -1757,6 +1758,21 @@ class Scheduler(SchedulerInterface):
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
+            policy = self.kv_cache_manager.block_pool.eviction_policy
+            if policy and policy.tracks_sessions:
+                specs = [g.kv_cache_spec for g in self.kv_cache_config.kv_cache_groups]
+                prompt_blocks = 0
+                if all(isinstance(spec, FullAttentionSpec) for spec in specs):
+                    context_parallel = (
+                        self.parallel_config.decode_context_parallel_size
+                        * self.parallel_config.prefill_context_parallel_size
+                    )
+                    for spec in specs:
+                        size = spec.block_size * context_parallel
+                        prompt_blocks += (request.num_prompt_tokens + size - 1) // size
+                policy.on_request_start(
+                    request.application_id, request.cache_session_id, prompt_blocks
+                )
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
@@ -1827,6 +1843,29 @@ class Scheduler(SchedulerInterface):
         self, request: Request, delay_free_blocks: bool = False
     ) -> dict[str, Any] | None:
         assert request.is_finished()
+
+        policy = self.kv_cache_manager.block_pool.eviction_policy
+        if policy and not policy.tracks_sessions:
+            policy = None
+        if policy:
+            policy.on_request_finish(request.application_id, request.cache_session_id)
+        if (
+            request.status
+            in (
+                RequestStatus.FINISHED_STOPPED,
+                RequestStatus.FINISHED_LENGTH_CAPPED,
+                RequestStatus.FINISHED_REPETITION,
+            )
+            and policy
+        ):
+            # Count physical KV blocks, including hits and partial pinned blocks,
+            # before releasing the completed request. No rate/time decay.
+            groups = self.kv_cache_manager.get_blocks(request.request_id).blocks
+            blocks = [b for group in groups for b in group if not b.is_null]
+            footprint = len({b.block_id for b in blocks})
+            policy.observe_demand(
+                request.application_id, footprint, request.cache_session_id, blocks
+            )
 
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
@@ -1947,6 +1986,7 @@ class Scheduler(SchedulerInterface):
             return None
         prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
         assert prefix_cache_stats is not None
+        eviction_counts = self.kv_cache_manager.block_pool.take_eviction_counts()
         connector_prefix_cache_stats: PrefixCacheStats | None = None
         if self.connector_prefix_cache_stats is not None:
             connector_prefix_cache_stats = self.connector_prefix_cache_stats
@@ -1966,6 +2006,7 @@ class Scheduler(SchedulerInterface):
             num_skipped_waiting_reqs=len(self.skipped_waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
+            kv_cache_evictions=eviction_counts,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,
             spec_decoding_stats=spec_stats,

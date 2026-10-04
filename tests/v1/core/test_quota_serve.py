@@ -439,6 +439,25 @@ def test_heterogeneous_sessions_keep_their_own_demand(monkeypatch):
     assert policy.quotas == {"chat": 95, "agent": 10}
 
 
+def test_arrived_prompt_updates_growing_and_unobserved_sessions(monkeypatch):
+    monkeypatch.setenv("EVICTION_POLICY", "quotaserve")
+    pool = BlockPool(num_gpu_blocks=201, enable_caching=True, hash_block_size=16)
+    policy = _adapter(pool)
+    policy.observe_demand("chat", 10)
+    policy.observe_demand("agent", 10)
+    policy.on_request_start("agent", "growing", 40)
+    assert policy.quotas == {"chat": 10, "agent": 40}
+    assert policy.mean_demand["agent"] == 10  # Arrival is not a completion sample.
+    policy.observe_demand("agent", 45, "growing")
+    policy.on_request_finish("agent", "growing")
+    policy.on_request_start("agent", "growing", 80)
+    assert policy.quotas == {"chat": 10, "agent": 80}
+    policy.observe_demand("agent", 90, "growing")
+    policy.on_request_finish("agent", "growing")
+    assert policy.quotas == {"chat": 10, "agent": 90}
+    assert not policy._prompt_demands
+
+
 def test_idle_window_adapts_to_observed_return_gap(monkeypatch):
     import vllm.v1.core.quota_serve as quota_module
 

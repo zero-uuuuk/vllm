@@ -32,7 +32,9 @@ class BlockEvictionPolicy(Protocol):
     def on_free(self, block: KVCacheBlock) -> None: ...
     def on_reset(self) -> None: ...
     def on_allocate(self, block: KVCacheBlock, app: str | None) -> None: ...
-    def on_request_start(self, app: str | None, session: str | None) -> None: ...
+    def on_request_start(
+        self, app: str | None, session: str | None, prompt_blocks: int = 0
+    ) -> None: ...
     def on_request_finish(self, app: str | None, session: str | None) -> None: ...
     def observe_demand(
         self,
@@ -110,7 +112,7 @@ class RankedEvictionAdapter:
     def on_allocate(self, block, app):
         pass
 
-    def on_request_start(self, app, session):
+    def on_request_start(self, app, session, prompt_blocks=0):
         pass
 
     def on_request_finish(self, app, session):

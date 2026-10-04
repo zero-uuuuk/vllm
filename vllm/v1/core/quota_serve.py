@@ -54,6 +54,7 @@ class QuotaServeAdapter:
         self._waiting_sessions: OrderedDict[tuple[str, str], float] = OrderedDict()
         self.session_counts: Counter[str] = Counter()
         self._session_demands: dict[tuple[str, str], int] = {}
+        self._prompt_demands: dict[tuple[str, str], int] = {}
         self._blocks = blocks
         self._session_blocks: dict[tuple[str, str], set[tuple[int, bytes]]] = {}
         self._session_block_refs: Counter[tuple[int, bytes]] = Counter()
@@ -73,7 +74,9 @@ class QuotaServeAdapter:
         self._freed_at: dict[int, float] = {}
         self._order = 0
 
-    def on_request_start(self, app: str | None, session: str | None) -> None:
+    def on_request_start(
+        self, app: str | None, session: str | None, prompt_blocks: int = 0
+    ) -> None:
         """Register queued requests too; multiple requests share one session charge."""
         if app not in self.apps or not session:
             return
@@ -88,6 +91,10 @@ class QuotaServeAdapter:
             self.session_counts[app] += 1
         self._waiting_sessions.pop(key, None)
         self._active_sessions[key] += 1
+        if prompt_blocks > 0:
+            self._prompt_demands[key] = max(
+                prompt_blocks, self._prompt_demands.get(key, 0)
+            )
         self._refresh_quotas()
 
     def on_request_finish(self, app: str | None, session: str | None) -> None:
@@ -101,6 +108,7 @@ class QuotaServeAdapter:
         self._active_sessions[key] -= 1
         if not self._active_sessions[key]:
             del self._active_sessions[key]
+            self._prompt_demands.pop(key, None)
             self._waiting_sessions[key] = time.monotonic()
         self._refresh_quotas()
 
@@ -199,7 +207,13 @@ class QuotaServeAdapter:
         # ponytail: sum over live sessions; maintain running sums at larger scale.
         observed: Counter[str] = Counter()
         known: Counter[str] = Counter()
-        for (app, _), footprint in self._session_demands.items():
+        for key in self._session_demands.keys() | self._prompt_demands.keys():
+            app, _ = key
+            # The arrived prompt is already known; a growing context must not
+            # wait until completion to correct its previous-turn estimate.
+            footprint = max(
+                self._session_demands.get(key, 0), self._prompt_demands.get(key, 0)
+            )
             observed[app] += footprint
             known[app] += 1
         scores = {}

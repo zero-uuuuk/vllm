@@ -52,7 +52,7 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import AttentionSpec, FullAttentionSpec, KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -1760,8 +1760,18 @@ class Scheduler(SchedulerInterface):
             self.requests[request.request_id] = request
             policy = self.kv_cache_manager.block_pool.eviction_policy
             if policy and policy.tracks_sessions:
+                specs = [g.kv_cache_spec for g in self.kv_cache_config.kv_cache_groups]
+                prompt_blocks = 0
+                if all(isinstance(spec, FullAttentionSpec) for spec in specs):
+                    context_parallel = (
+                        self.parallel_config.decode_context_parallel_size
+                        * self.parallel_config.prefill_context_parallel_size
+                    )
+                    for spec in specs:
+                        size = spec.block_size * context_parallel
+                        prompt_blocks += (request.num_prompt_tokens + size - 1) // size
                 policy.on_request_start(
-                    request.application_id, request.cache_session_id
+                    request.application_id, request.cache_session_id, prompt_blocks
                 )
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)

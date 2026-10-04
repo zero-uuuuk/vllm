@@ -70,6 +70,7 @@ class QuotaServeAdapter:
         )
         self._free_cached: dict[str | None, OrderedDict[int, KVCacheBlock]] = {}
         self._free_order: dict[int, int] = {}
+        self._freed_at: dict[int, float] = {}
         self._order = 0
 
     def on_request_start(self, app: str | None, session: str | None) -> None:
@@ -256,6 +257,7 @@ class QuotaServeAdapter:
             )
             self._order += 1
             self._free_order[block.block_id] = self._order
+            self._freed_at[block.block_id] = time.monotonic()
 
     def on_evict(self, block: KVCacheBlock) -> None:
         if block.ref_cnt == 0:
@@ -278,6 +280,7 @@ class QuotaServeAdapter:
         self._owners.clear()
         self._free_cached.clear()
         self._free_order.clear()
+        self._freed_at.clear()
         self._order = 0
         self._free_uncached = OrderedDict(
             (block.block_id, block)
@@ -293,6 +296,7 @@ class QuotaServeAdapter:
             if not owner_blocks:
                 del self._free_cached[block.owner]
         self._free_order.pop(block.block_id, None)
+        self._freed_at.pop(block.block_id, None)
 
     def take_free_block(
         self, application_id: str | None = None
@@ -320,6 +324,14 @@ class QuotaServeAdapter:
                 owner = self._owners[head_id]
                 block = self._free_cached[owner][head_id]
                 reason = "quotaserve"
+                # A quota violation alone should not displace a prefix still
+                # inside its observed return interval ahead of older cache.
+                # No gap estimate means the original quota rule applies.
+                gap = self.mean_gap.get(owner, 0.0) if owner is not None else 0.0
+                if time.monotonic() - self._freed_at[head_id] < gap:
+                    block = self.free_block_queue.fake_free_list_head.next_free_block
+                    assert block is not None
+                    reason = "quotaserve_reuse"
             else:
                 # Excess owners can have all their blocks pinned. Preserve progress
                 # and expose this exception rather than claiming strict isolation.

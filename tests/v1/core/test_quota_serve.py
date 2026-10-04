@@ -198,6 +198,36 @@ def test_pinned_excess_reports_pressure_fallback(monkeypatch) -> None:
     assert pool.take_eviction_counts() == {"quotaserve_pressure": 1}
 
 
+def test_quota_reclaim_respects_observed_return_interval(monkeypatch):
+    import vllm.v1.core.quota_serve as quota_module
+
+    clock = [0.0]
+    monkeypatch.setattr(
+        quota_module, "time", SimpleNamespace(monotonic=lambda: clock[0])
+    )
+    monkeypatch.setenv("EVICTION_POLICY", "quotaserve")
+    pool = BlockPool(num_gpu_blocks=7, enable_caching=True, hash_block_size=16)
+    policy = _adapter(pool)
+    chat = pool.get_new_blocks(3, "chat")
+    agent = pool.get_new_blocks(3, "agent")
+    for block in chat:
+        _cache(pool, block, "chat")
+    pool.free_blocks(chat)
+    clock[0] = 10
+    for block in agent:
+        _cache(pool, block, "agent")
+    pool.free_blocks(agent)
+    policy.mean_gap["agent"] = 1
+    # Agent is at quota, but its prefix has not had a chance to return yet.
+    clock[0] = 10.5
+    assert pool.get_new_blocks(1, "agent") == chat[:1]
+    assert pool.take_eviction_counts() == {"quotaserve_reuse": 1}
+    # Once the observed interval passes, ordinary quota enforcement resumes.
+    clock[0] = 11.1
+    assert pool.get_new_blocks(1, "agent") == agent[:1]
+    assert pool.take_eviction_counts() == {"quotaserve": 1}
+
+
 def test_pinning_cached_blocks_keeps_resident_charge(monkeypatch) -> None:
     monkeypatch.setenv("EVICTION_POLICY", "quotaserve")
     pool = BlockPool(num_gpu_blocks=3, enable_caching=True, hash_block_size=16)

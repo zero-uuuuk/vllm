@@ -155,6 +155,10 @@ class Request:
             if isinstance(application_id, str) and application_id
             else None
         )
+        session_id = extra_args.get("session_id") if extra_args else None
+        self.cache_session_id: str | None = (
+            session_id if isinstance(session_id, str) and session_id else None
+        )
         self.cache_salt: str | None = cache_salt
         if self.application_id is not None:
             # 앱 ID와 선택적 클라이언트 salt를 함께 서명해 앱별 캐시 키를 분리한다.

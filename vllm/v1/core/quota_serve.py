@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Mean-footprint KV guarantees with a shared LRU borrowing pool."""
+"""Session-aware mean-footprint KV guarantees with a shared LRU borrowing pool."""
 
 from __future__ import annotations
 
 import json
 import math
 import os
+import time
 from collections import Counter, OrderedDict
 from typing import TYPE_CHECKING
 
@@ -42,6 +43,20 @@ class QuotaServeAdapter:
             raise ValueError("QUOTASERVE_APPS requires distinct nonempty app IDs")
         self.apps = tuple(apps)
         self.capacity = sum(not block.is_null for block in blocks)
+        self.session_idle_ttl = float(os.getenv("QUOTASERVE_SESSION_IDLE_TTL_S", "60"))
+        if not math.isfinite(self.session_idle_ttl) or self.session_idle_ttl <= 0:
+            raise ValueError(
+                "QUOTASERVE_SESSION_IDLE_TTL_S must be finite and positive"
+            )
+        self._active_sessions: Counter[tuple[str, str]] = Counter()
+        self._waiting_sessions: OrderedDict[tuple[str, str], float] = OrderedDict()
+        self.session_counts: Counter[str] = Counter()
+        self._session_demands: dict[tuple[str, str], int] = {}
+        self._blocks = blocks
+        self._session_blocks: dict[tuple[str, str], set[tuple[int, bytes]]] = {}
+        self._session_block_refs: Counter[tuple[int, bytes]] = Counter()
+        self._expired_free: OrderedDict[int, KVCacheBlock] = OrderedDict()
+        self.mean_gap: dict[str, float] = {}
         self.mean_demand: dict[str, float] = {}
         self.quotas: dict[str, int] = {}
         self._refresh_quotas()
@@ -55,7 +70,100 @@ class QuotaServeAdapter:
         self._free_order: dict[int, int] = {}
         self._order = 0
 
-    def observe_demand(self, app: str | None, num_blocks: int) -> None:
+    def on_request_start(self, app: str | None, session: str | None) -> None:
+        """Register queued requests too; multiple requests share one session charge."""
+        if app not in self.apps or not session:
+            return
+        assert app is not None
+        key = (app, session)
+        if key in self._waiting_sessions:
+            gap = time.monotonic() - self._waiting_sessions[key]
+            previous = self.mean_gap.get(app, gap)
+            self.mean_gap[app] = 0.8 * previous + 0.2 * gap
+        self._expire_sessions()
+        if key not in self._active_sessions and key not in self._waiting_sessions:
+            self.session_counts[app] += 1
+        self._waiting_sessions.pop(key, None)
+        self._active_sessions[key] += 1
+        self._refresh_quotas()
+
+    def on_request_finish(self, app: str | None, session: str | None) -> None:
+        """Keep a completed request's session charged through its think time."""
+        if app not in self.apps or not session:
+            return
+        assert app is not None
+        key = (app, session)
+        if key not in self._active_sessions:
+            return
+        self._active_sessions[key] -= 1
+        if not self._active_sessions[key]:
+            del self._active_sessions[key]
+            self._waiting_sessions[key] = time.monotonic()
+        self._refresh_quotas()
+
+    def _session_timeout(self, app: str) -> float:
+        if app not in self.mean_gap:
+            return self.session_idle_ttl
+        return max(5.0, 3.0 * self.mean_gap[app])
+
+    def _expire_sessions(self) -> None:
+        now = time.monotonic()
+        changed = False
+        # ponytail: scan waiting sessions; use per-app queues for larger populations.
+        for key, completed in tuple(self._waiting_sessions.items()):
+            if completed + self._session_timeout(key[0]) > now:
+                continue
+            del self._waiting_sessions[key]
+            self._session_demands.pop(key, None)
+            for token in self._session_blocks.pop(key, ()):
+                self._session_block_refs[token] -= 1
+                if self._session_block_refs[token]:
+                    continue
+                del self._session_block_refs[token]
+                block = self._blocks[token[0]]
+                if block.block_hash == token[1] and block.block_id in self._free_order:
+                    self._expired_free[block.block_id] = block
+                    changed = True
+            self.session_counts[key[0]] -= 1
+            if not self.session_counts[key[0]]:
+                del self.session_counts[key[0]]
+        if changed:
+            # Sort when sessions expire; allocation and removal stay O(1).
+            self._expired_free = OrderedDict(
+                sorted(
+                    self._expired_free.items(),
+                    key=lambda item: self._free_order[item[0]],
+                )
+            )
+
+    def _remember_session_blocks(
+        self, key: tuple[str, str], blocks: list[KVCacheBlock]
+    ) -> None:
+        previous = self._session_blocks.get(key, set())
+        current = {
+            token for token in previous if self._blocks[token[0]].block_hash == token[1]
+        }
+        for token in previous - current:
+            self._session_block_refs[token] -= 1
+            if not self._session_block_refs[token]:
+                del self._session_block_refs[token]
+        # Keep valid historical blocks until session expiry. This does not infer
+        # the final turn or discard generated text based on the next prompt.
+        current.update(
+            (b.block_id, h) for b in blocks if (h := b.block_hash) is not None
+        )
+        for token in current - previous:
+            self._session_block_refs[token] += 1
+            self._expired_free.pop(token[0], None)
+        self._session_blocks[key] = current
+
+    def observe_demand(
+        self,
+        app: str | None,
+        num_blocks: int,
+        session: str | None = None,
+        blocks: list[KVCacheBlock] | None = None,
+    ) -> None:
         """Observe a normally completed request's physical KV footprint.
 
         Cached hits count toward footprint. Arrival frequency and recomputed
@@ -66,9 +174,16 @@ class QuotaServeAdapter:
         assert app is not None
         previous = self.mean_demand.get(app, float(num_blocks))
         self.mean_demand[app] = 0.8 * previous + 0.2 * num_blocks
+        if session:
+            key = (app, session)
+            if key in self._active_sessions or key in self._waiting_sessions:
+                self._session_demands[key] = num_blocks
+                if blocks is not None:
+                    self._remember_session_blocks(key, blocks)
         self._refresh_quotas()
 
     def _refresh_quotas(self) -> None:
+        self._expire_sessions()
         # An unseen app inherits the observed apps' mean, avoiding a zero-quota
         # cold start. Before any observations, equal scores give equal quotas.
         prior = (
@@ -76,10 +191,20 @@ class QuotaServeAdapter:
             if self.mean_demand
             else self.capacity / len(self.apps)
         )
-        scores = {
-            app: max(1, math.ceil(self.mean_demand.get(app, prior)))
-            for app in self.apps
-        }
+        # Use each live session's last observation, so a long completed request
+        # cannot inflate the estimated footprint of every shorter session.
+        # ponytail: sum over live sessions; maintain running sums at larger scale.
+        observed: Counter[str] = Counter()
+        known: Counter[str] = Counter()
+        for (app, _), footprint in self._session_demands.items():
+            observed[app] += footprint
+            known[app] += 1
+        scores = {}
+        for app in self.apps:
+            unknown = max(1, self.session_counts[app]) - known[app]
+            scores[app] = max(
+                1, math.ceil(observed[app] + unknown * self.mean_demand.get(app, prior))
+            )
         total = sum(scores.values())
         budget = min(self.capacity, total)
         exact = {app: budget * score / total for app, score in scores.items()}
@@ -90,8 +215,12 @@ class QuotaServeAdapter:
         if quotas != self.quotas:
             self.quotas = quotas
             logger.info(
-                "QuotaServe mean-demand quotas: demand=%s blocks=%s",
+                "QuotaServe session-demand quotas: demand=%s scores=%s "
+                "idle_window_s=%s sessions=%s blocks=%s",
                 self.mean_demand,
+                scores,
+                {app: self._session_timeout(app) for app in self.apps},
+                dict(self.session_counts),
                 self.quotas,
             )
 
@@ -133,6 +262,14 @@ class QuotaServeAdapter:
         # An externally invalidated pinned block still consumes physical memory.
 
     def on_reset(self) -> None:
+        # A cache reset may leave queued requests registered in the scheduler.
+        self._waiting_sessions.clear()
+        self.session_counts = Counter(app for app, _ in self._active_sessions)
+        self._session_demands.clear()
+        self._session_blocks.clear()
+        self._session_block_refs.clear()
+        self._expired_free.clear()
+        self.mean_gap.clear()
         self.mean_demand.clear()
         self._refresh_quotas()
         self.resident.clear()
@@ -146,6 +283,7 @@ class QuotaServeAdapter:
         )
 
     def _forget_free(self, block: KVCacheBlock) -> None:
+        self._expired_free.pop(block.block_id, None)
         self._free_uncached.pop(block.block_id, None)
         owner_blocks = self._free_cached.get(block.owner)
         if owner_blocks is not None:
@@ -160,6 +298,9 @@ class QuotaServeAdapter:
         if self._free_uncached:
             block = next(iter(self._free_uncached.values()))
             reason = None
+        elif self._expired_free:
+            block = next(iter(self._expired_free.values()))
+            reason = "quotaserve_expired"
         else:
             # Reclaim the oldest borrowed block. Include the incoming allocation
             # so an app at quota can replace its own blocks without stealing.

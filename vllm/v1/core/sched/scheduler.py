@@ -1758,6 +1758,11 @@ class Scheduler(SchedulerInterface):
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
+            policy = self.kv_cache_manager.block_pool.eviction_policy
+            if policy:
+                policy.on_request_start(
+                    request.application_id, request.cache_session_id
+                )
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
@@ -1829,18 +1834,26 @@ class Scheduler(SchedulerInterface):
     ) -> dict[str, Any] | None:
         assert request.is_finished()
 
-        if request.status in (
-            RequestStatus.FINISHED_STOPPED,
-            RequestStatus.FINISHED_LENGTH_CAPPED,
-            RequestStatus.FINISHED_REPETITION,
-        ) and (policy := self.kv_cache_manager.block_pool.eviction_policy):
+        policy = self.kv_cache_manager.block_pool.eviction_policy
+        if policy:
+            policy.on_request_finish(request.application_id, request.cache_session_id)
+        if (
+            request.status
+            in (
+                RequestStatus.FINISHED_STOPPED,
+                RequestStatus.FINISHED_LENGTH_CAPPED,
+                RequestStatus.FINISHED_REPETITION,
+            )
+            and policy
+        ):
             # Count physical KV blocks, including hits and partial pinned blocks,
             # before releasing the completed request. No rate/time decay.
             groups = self.kv_cache_manager.get_blocks(request.request_id).blocks
-            footprint = len(
-                {b.block_id for group in groups for b in group if not b.is_null}
+            blocks = [b for group in groups for b in group if not b.is_null]
+            footprint = len({b.block_id for b in blocks})
+            policy.observe_demand(
+                request.application_id, footprint, request.cache_session_id, blocks
             )
-            policy.observe_demand(request.application_id, footprint)
 
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)

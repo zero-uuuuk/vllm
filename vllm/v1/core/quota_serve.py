@@ -60,6 +60,7 @@ class QuotaServeAdapter:
         self._session_block_refs: Counter[tuple[int, bytes]] = Counter()
         self._expired_free: OrderedDict[int, KVCacheBlock] = OrderedDict()
         self.mean_gap: dict[str, float] = {}
+        self.gap_variance: dict[str, float] = {}
         self.mean_demand: dict[str, float] = {}
         self.quotas: dict[str, int] = {}
         self._refresh_quotas()
@@ -85,6 +86,9 @@ class QuotaServeAdapter:
         if key in self._waiting_sessions:
             gap = time.monotonic() - self._waiting_sessions[key]
             previous = self.mean_gap.get(app, gap)
+            self.gap_variance[app] = 0.8 * (
+                self.gap_variance.get(app, 0.0) + 0.2 * (gap - previous) ** 2
+            )
             self.mean_gap[app] = 0.8 * previous + 0.2 * gap
         self._expire_sessions()
         if key not in self._active_sessions and key not in self._waiting_sessions:
@@ -238,9 +242,12 @@ class QuotaServeAdapter:
             self.quotas = quotas
             logger.info(
                 "QuotaServe session-demand quotas: demand=%s scores=%s "
+                "mean_gap_s=%s gap_variance_s2=%s "
                 "idle_window_s=%s sessions=%s blocks=%s",
                 self.mean_demand,
                 scores,
+                self.mean_gap,
+                self.gap_variance,
                 {app: self._session_timeout(app) for app in self.apps},
                 dict(self.session_counts),
                 self.quotas,
@@ -293,6 +300,7 @@ class QuotaServeAdapter:
         self._session_block_refs.clear()
         self._expired_free.clear()
         self.mean_gap.clear()
+        self.gap_variance.clear()
         self.mean_demand.clear()
         self._refresh_quotas()
         self.resident.clear()
@@ -347,6 +355,14 @@ class QuotaServeAdapter:
                 # inside its observed return interval ahead of older cache.
                 # No gap estimate means the original quota rule applies.
                 gap = self.mean_gap.get(owner, 0.0) if owner is not None else 0.0
+                if owner is not None and gap > 0:
+                    # Allow observed arrival jitter without reserving a prefix
+                    # beyond the existing idle timeout. This is a heuristic
+                    # margin, not a statistical coverage guarantee.
+                    gap = min(
+                        self._session_timeout(owner),
+                        gap + 2.0 * math.sqrt(self.gap_variance.get(owner, 0.0)),
+                    )
                 if time.monotonic() - self._freed_at[head_id] < gap:
                     block = self.free_block_queue.fake_free_list_head.next_free_block
                     assert block is not None

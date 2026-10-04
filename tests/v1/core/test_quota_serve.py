@@ -494,6 +494,29 @@ def test_idle_window_adapts_to_observed_return_gap(monkeypatch):
     assert not policy.mean_gap
 
 
+def test_return_gap_variance_is_observed_and_reset(monkeypatch):
+    import vllm.v1.core.quota_serve as quota_module
+
+    clock = [0.0]
+    monkeypatch.setattr(
+        quota_module, "time", SimpleNamespace(monotonic=lambda: clock[0])
+    )
+    monkeypatch.setenv("EVICTION_POLICY", "quotaserve")
+    pool = BlockPool(num_gpu_blocks=7, enable_caching=True, hash_block_size=16)
+    policy = _adapter(pool)
+    policy.on_request_start("agent", "s")
+    policy.on_request_finish("agent", "s")
+    clock[0] = 1
+    policy.on_request_start("agent", "s")
+    policy.on_request_finish("agent", "s")
+    clock[0] = 4
+    policy.on_request_start("agent", "s")
+    assert policy.mean_gap["agent"] == pytest.approx(1.4)
+    assert policy.gap_variance["agent"] == pytest.approx(0.64)
+    assert pool.reset_prefix_cache()
+    assert not policy.gap_variance
+
+
 def test_expired_session_cache_is_reclaimed_before_live_prefix(monkeypatch):
     import vllm.v1.core.quota_serve as quota_module
 

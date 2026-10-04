@@ -27,6 +27,8 @@ class QuotaServeAdapter:
     be victims. Mean demand persists across think time; cache reset clears it.
     """
 
+    tracks_sessions = True
+
     def __init__(
         self, blocks: list[KVCacheBlock], free_block_queue: FreeKVCacheBlockQueue
     ) -> None:

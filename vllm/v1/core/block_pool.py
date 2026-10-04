@@ -448,9 +448,9 @@ class BlockPool:
         """
         for block in blocks:
             # 캐시 hit으로 free block을 다시 쓰면 회수 후보 목록에서 제외한다.
+            if not block.is_null and self.eviction_policy is not None:
+                self.eviction_policy.on_touch(block)
             if block.ref_cnt == 0 and not block.is_null:
-                if self.eviction_policy is not None:
-                    self.eviction_policy.on_touch(block)
                 self.free_block_queue.remove(block)
             block.ref_cnt += 1
             if self.metrics_collector:

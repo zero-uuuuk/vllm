@@ -1759,7 +1759,7 @@ class Scheduler(SchedulerInterface):
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
             policy = self.kv_cache_manager.block_pool.eviction_policy
-            if policy:
+            if policy and policy.tracks_sessions:
                 policy.on_request_start(
                     request.application_id, request.cache_session_id
                 )
@@ -1835,6 +1835,8 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
 
         policy = self.kv_cache_manager.block_pool.eviction_policy
+        if policy and not policy.tracks_sessions:
+            policy = None
         if policy:
             policy.on_request_finish(request.application_id, request.cache_session_id)
         if (

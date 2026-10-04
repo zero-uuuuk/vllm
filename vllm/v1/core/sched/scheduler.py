@@ -298,9 +298,6 @@ class Scheduler(SchedulerInterface):
             )
 
         self._pause_state: PauseState = PauseState.UNPAUSED
-        # QuotaServe일 때만 1초 간격 quota 갱신 스레드를 시작한다.
-        if eviction_policy := self.kv_cache_manager.block_pool.eviction_policy:
-            eviction_policy.start()
 
     def _mamba_block_aligned_split(
         self,
@@ -649,7 +646,7 @@ class Scheduler(SchedulerInterface):
                     )
                     assert num_computed_tokens <= request.num_tokens
 
-                    # ############ Signal Observer: 첫 prefill의 cache hit ############
+                    # Record native prefill metrics, independently of eviction policy.
                     # 내부 캐시 hit만 기록해 외부 KV와 재개 후 중복을 제외한다.
                     if request.prefill_stats is not None:
                         assert num_computed_tokens <= request.num_prompt_tokens
@@ -658,7 +655,6 @@ class Scheduler(SchedulerInterface):
                             num_local_cached_tokens=num_new_local_computed_tokens,
                             num_external_cached_tokens=num_external_computed_tokens,
                         )
-                        request.quota_cached_tokens = num_new_local_computed_tokens
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
                     # after async KV recvs are completed.
@@ -1837,11 +1833,14 @@ class Scheduler(SchedulerInterface):
             RequestStatus.FINISHED_STOPPED,
             RequestStatus.FINISHED_LENGTH_CAPPED,
             RequestStatus.FINISHED_REPETITION,
-        ):
-            # ############ Signal Observer: 완료 요청의 token 통계 ############
-            # 정상 완료 요청의 토큰 수만 앱별 현재 1초 구간에 누적한다.
-            if eviction_policy := self.kv_cache_manager.block_pool.eviction_policy:
-                eviction_policy.observe_request(request)
+        ) and (policy := self.kv_cache_manager.block_pool.eviction_policy):
+            # Count physical KV blocks, including hits and partial pinned blocks,
+            # before releasing the completed request. No rate/time decay.
+            groups = self.kv_cache_manager.get_blocks(request.request_id).blocks
+            footprint = len(
+                {b.block_id for group in groups for b in group if not b.is_null}
+            )
+            policy.observe_demand(request.application_id, footprint)
 
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
@@ -2011,9 +2010,6 @@ class Scheduler(SchedulerInterface):
         return spec_decoding_stats
 
     def shutdown(self) -> None:
-        # 스케줄러 종료 시 정책의 주기 갱신 스레드도 함께 종료한다.
-        if eviction_policy := self.kv_cache_manager.block_pool.eviction_policy:
-            eviction_policy.stop()
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
         if self.connector is not None:

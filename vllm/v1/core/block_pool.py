@@ -333,7 +333,9 @@ class BlockPool:
                 )
             )
 
-    def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
+    def get_new_blocks(
+        self, num_blocks: int, application_id: str | None = None
+    ) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
         Note that we do not check block cache in this function.
@@ -347,16 +349,25 @@ class BlockPool:
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        # 정책은 free block의 선택만 바꾼다. hash 제거와 참조 수 갱신은 이 풀이 맡는다.
         policy = self.eviction_policy
-        selected = (
-            [policy.take_free_block() for _ in range(num_blocks)]
-            if policy is not None
-            else [
-                (block, "lru")
-                for block in self.free_block_queue.popleft_n(num_blocks)
-            ]
-        )
+        if policy is not None:
+            # Account each allocation before selecting the next victim in a batch.
+            ret = []
+            for _ in range(num_blocks):
+                block, reason = policy.take_free_block(application_id)
+                if self._maybe_evict_cached_block(block):
+                    assert reason is not None
+                    self._eviction_counts[reason] += 1
+                assert block.ref_cnt == 0
+                block.ref_cnt += 1
+                policy.on_allocate(block, application_id)
+                if self.metrics_collector:
+                    self.metrics_collector.on_block_allocated(block)
+                ret.append(block)
+            return ret
+        selected = [
+            (block, "lru") for block in self.free_block_queue.popleft_n(num_blocks)
+        ]
         ret = [block for block, _ in selected]
 
         # In order to only iterate the list once, we duplicated code a bit

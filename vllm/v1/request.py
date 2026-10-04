@@ -164,8 +164,6 @@ class Request:
             self.cache_salt = hmac.new(
                 _APPLICATION_CACHE_SALT_KEY, salt_input, hashlib.sha256
             ).hexdigest()
-        # 첫 prefill의 내부 prefix-cache 재사용량을 스케줄러가 기록한다.
-        self.quota_cached_tokens = 0
 
         # Multi-modal related
         self.mm_features = mm_features or []

@@ -2,6 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
+import hashlib
+import hmac
+import json
+import secrets
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -20,12 +24,17 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
+from vllm.v1.metrics.stats import PrefillStats
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.v1.core.kv_cache_utils import BlockHash
+
+
+# 같은 프로세스에서 앱별 cache_salt를 안정적으로 유도할 비밀 키.
+_APPLICATION_CACHE_SALT_KEY = secrets.token_bytes(32)
 
 
 @dataclass
@@ -73,6 +82,7 @@ class Request:
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
         resumable: bool = False,
         reasoning_ended: bool | None = None,
+        reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -85,6 +95,9 @@ class Request:
         )
         if self.structured_output_request is not None:
             self.structured_output_request.reasoning_ended = reasoning_ended
+            self.structured_output_request.reasoning_parser_kwargs = (
+                reasoning_parser_kwargs
+            )
         self.arrival_time = arrival_time if arrival_time is not None else time.time()
 
         self.status = RequestStatus.WAITING
@@ -133,7 +146,28 @@ class Request:
 
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
+        # ############ Application Identity ############
+        # API의 vllm_xargs가 sampling_params.extra_args로 전달된다.
+        extra_args = sampling_params.extra_args if sampling_params else None
+        application_id = extra_args.get("application_id") if extra_args else None
+        self.application_id: str | None = (
+            application_id
+            if isinstance(application_id, str) and application_id
+            else None
+        )
+        session_id = extra_args.get("session_id") if extra_args else None
+        self.cache_session_id: str | None = (
+            session_id if isinstance(session_id, str) and session_id else None
+        )
         self.cache_salt: str | None = cache_salt
+        if self.application_id is not None:
+            # 앱 ID와 선택적 클라이언트 salt를 함께 서명해 앱별 캐시 키를 분리한다.
+            salt_input = json.dumps(
+                [self.application_id, cache_salt], ensure_ascii=False
+            ).encode("utf-8")
+            self.cache_salt = hmac.new(
+                _APPLICATION_CACHE_SALT_KEY, salt_input, hashlib.sha256
+            ).hexdigest()
 
         # Multi-modal related
         self.mm_features = mm_features or []
@@ -145,9 +179,6 @@ class Request:
         self.all_token_ids = ConstantList(self._all_token_ids)
         # trace_headers
         self.trace_headers = trace_headers
-        # State
-        # The number of tokens with prefix cache hits.
-        self.num_cached_tokens = -1
 
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
@@ -159,8 +190,7 @@ class Request:
         # The number of times this request has been preempted by the scheduler.
         self.num_preemptions = 0
 
-        # The number of tokens that have been computed remotely.
-        self.num_external_computed_tokens = 0
+        self.prefill_stats: PrefillStats | None = PrefillStats()
 
         self.block_hashes: list[BlockHash] = []
         # Store the block hasher without binding self to avoid creating a
@@ -198,6 +228,7 @@ class Request:
             block_hasher=block_hasher,
             resumable=request.resumable,
             reasoning_ended=request.reasoning_ended,
+            reasoning_parser_kwargs=request.reasoning_parser_kwargs,
         )
 
     def append_output_token_ids(
@@ -277,6 +308,13 @@ class Request:
             return None
         events, self.events = self.events, []
         return events
+
+    def take_prefill_stats(self) -> PrefillStats | None:
+        if self.prefill_stats is None:
+            return None
+        prefill_stats = self.prefill_stats
+        self.prefill_stats = None
+        return prefill_stats
 
     def __lt__(self, other: "Request") -> bool:
         """

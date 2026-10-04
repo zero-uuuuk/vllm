@@ -139,34 +139,39 @@ class QuotaServeAdapter:
             if not self.session_counts[key[0]]:
                 del self.session_counts[key[0]]
         if changed:
-            # Sort when sessions expire; allocation and removal stay O(1).
-            self._expired_free = OrderedDict(
-                sorted(
-                    self._expired_free.items(),
-                    key=lambda item: self._free_order[item[0]],
-                )
+            self._sort_retired_blocks()
+
+    def _sort_retired_blocks(self) -> None:
+        # Expired sessions and superseded contexts share one LRU reclaim queue.
+        self._expired_free = OrderedDict(
+            sorted(
+                self._expired_free.items(),
+                key=lambda item: self._free_order[item[0]],
             )
+        )
 
     def _remember_session_blocks(
         self, key: tuple[str, str], blocks: list[KVCacheBlock]
     ) -> None:
         previous = self._session_blocks.get(key, set())
-        current = {
-            token for token in previous if self._blocks[token[0]].block_hash == token[1]
-        }
+        current = {(b.block_id, h) for b in blocks if (h := b.block_hash) is not None}
+        changed = False
         for token in previous - current:
             self._session_block_refs[token] -= 1
             if not self._session_block_refs[token]:
                 del self._session_block_refs[token]
-        # Keep valid historical blocks until session expiry. This does not infer
-        # the final turn or discard generated text based on the next prompt.
-        current.update(
-            (b.block_id, h) for b in blocks if (h := b.block_hash) is not None
-        )
+                block = self._blocks[token[0]]
+                if block.block_hash == token[1] and block.block_id in self._free_order:
+                    self._expired_free[block.block_id] = block
+                    changed = True
+        # Only the request that has just completed is used here. Older branches
+        # absent from this context no longer receive this session's protection.
         for token in current - previous:
             self._session_block_refs[token] += 1
             self._expired_free.pop(token[0], None)
         self._session_blocks[key] = current
+        if changed:
+            self._sort_retired_blocks()
 
     def observe_demand(
         self,
@@ -320,7 +325,7 @@ class QuotaServeAdapter:
             reason = None
         elif self._expired_free:
             block = next(iter(self._expired_free.values()))
-            reason = "quotaserve_expired"
+            reason = "quotaserve_retired"
         else:
             # Reclaim the oldest borrowed block. Include the incoming allocation
             # so an app at quota can replace its own blocks without stealing.

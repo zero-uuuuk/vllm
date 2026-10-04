@@ -519,7 +519,41 @@ def test_expired_session_cache_is_reclaimed_before_live_prefix(monkeypatch):
     policy._refresh_quotas()
     assert pool.get_new_blocks(1, "chat") == saved["agent"][-1:]
     assert all(b.block_hash is not None for b in saved["chat"])
-    assert pool.take_eviction_counts() == {"quotaserve_expired": 1}
+    assert pool.take_eviction_counts() == {"quotaserve_retired": 1}
+
+
+@pytest.mark.parametrize("shared_tail", [False, True])
+def test_completed_context_retires_only_unshared_previous_branches(
+    monkeypatch, shared_tail
+):
+    monkeypatch.setenv("EVICTION_POLICY", "quotaserve")
+    pool = BlockPool(num_gpu_blocks=5, enable_caching=True, hash_block_size=16)
+    policy = _adapter(pool)
+    policy.on_request_start("chat", "s")
+    prefix, old_tail = pool.get_new_blocks(2, "chat")
+    for block in (prefix, old_tail):
+        _cache(pool, block, "chat")
+    policy.observe_demand("chat", 2, "s", [prefix, old_tail])
+    policy.on_request_finish("chat", "s")
+    if shared_tail:
+        policy.on_request_start("chat", "other")
+        policy.observe_demand("chat", 2, "other", [prefix, old_tail])
+    pool.free_blocks([old_tail, prefix])
+
+    policy.on_request_start("chat", "s")
+    pool.touch([prefix])
+    new_tail = pool.get_new_blocks(2, "chat")
+    for block in new_tail:
+        _cache(pool, block, "chat")
+    current = [prefix, *new_tail]
+    policy.observe_demand("chat", 3, "s", current)
+    policy.on_request_finish("chat", "s")
+    pool.free_blocks(reversed(current))
+    assert (old_tail.block_id in policy._expired_free) is (not shared_tail)
+    if not shared_tail:
+        assert pool.get_new_blocks(1, "agent") == [old_tail]
+        assert pool.take_eviction_counts() == {"quotaserve_retired": 1}
+        assert prefix.block_hash is not None
 
 
 @pytest.mark.parametrize("pinned_at_expiry", [False, True])

@@ -1,20 +1,24 @@
-<!-- markdownlint-disable -->
-PLEASE FILL IN THE PR DESCRIPTION HERE ENSURING ALL CHECKLIST ITEMS (AT THE BOTTOM) HAVE BEEN CONSIDERED.
+## 변경 목적
 
-## Purpose
+<!-- 해결하려는 문제와 관련 이슈를 적어주세요. -->
 
-## Test Plan
+## 주요 변경
 
-## Test Result
+-
 
----
-<details>
-<summary> Essential Elements of an Effective PR Description Checklist </summary>
+## 중복 작업 확인
 
-- [ ] The purpose of the PR, such as "Fix some issue (link existing issues this PR will resolve)".
-- [ ] The test plan, such as providing test command.
-- [ ] The test results, such as pasting the results comparison before and after, or e2e results
-- [ ] (Optional) The necessary documentation update, such as updating `supported_models.md` and `examples` for a new model.
-</details>
+- 관련 이슈 / 기존 PR:
+- 기존 작업과 중복되지 않는 이유:
 
-**BEFORE SUBMITTING, PLEASE READ <https://docs.vllm.ai/en/latest/contributing>** (anything written below this line will be removed by GitHub Actions)
+## 검증
+
+- 실행한 테스트 명령:
+- 테스트 결과:
+- 실행하지 못한 검증과 이유:
+
+## AI 사용 및 작성자 확인
+
+- AI 사용 여부와 사용 범위:
+- [ ] 작성자가 모든 변경 줄을 검토하고 변경 내용을 이해했습니다.
+- [ ] 관련 테스트를 직접 실행하고 위에 결과를 기록했습니다.

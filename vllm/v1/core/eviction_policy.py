@@ -12,6 +12,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Protocol
 
 from vllm.v1.core.quota_serve import QuotaServeAdapter
+from vllm.v1.core.unicache import UniCacheAdapter
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_utils import FreeKVCacheBlockQueue, KVCacheBlock
@@ -23,7 +24,10 @@ class BlockEvictionPolicy(Protocol):
 
     tracks_sessions: bool
 
-    def on_cached(self, block: KVCacheBlock, request: Request) -> None: ...
+    def on_cached(
+        self, block: KVCacheBlock, request: Request, prefix_tokens: int = 0
+    ) -> None: ...
+    def on_prefix_lookup(self, request: Request, hit_tokens: int) -> None: ...
     def take_free_block(
         self, application_id: str | None = None
     ) -> tuple[KVCacheBlock, str | None]: ...
@@ -71,10 +75,13 @@ class RankedEvictionAdapter:
         self.candidates = {}
         self.heap = []
 
-    def on_cached(self, block, request):
+    def on_cached(self, block, request, prefix_tokens=0):
         self.clock += 1
         self.frequency[block.block_id] = 1
         self.order[block.block_id] = self.clock
+
+    def on_prefix_lookup(self, request, hit_tokens):
+        pass
 
     def _remove(self, block):
         self.uncached.pop(block.block_id, None)
@@ -144,6 +151,10 @@ _POLICY_ADAPTERS: dict[
     str, Callable[[list[KVCacheBlock], FreeKVCacheBlockQueue], BlockEvictionPolicy]
 ] = {
     "quotaserve": QuotaServeAdapter,
+    "quotaserve_active_only": partial(QuotaServeAdapter, ablation="active_only"),
+    "quotaserve_no_retired": partial(QuotaServeAdapter, ablation="no_retired"),
+    "quotaserve_no_reuse": partial(QuotaServeAdapter, ablation="no_reuse"),
+    "unicache": UniCacheAdapter,
     "fifo": partial(RankedEvictionAdapter, mode="fifo"),
     "lfu": partial(RankedEvictionAdapter, mode="lfu"),
 }

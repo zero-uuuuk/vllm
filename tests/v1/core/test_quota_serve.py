@@ -198,14 +198,17 @@ def test_pinned_excess_reports_pressure_fallback(monkeypatch) -> None:
     assert pool.take_eviction_counts() == {"quotaserve_pressure": 1}
 
 
-def test_quota_reclaim_respects_observed_return_interval(monkeypatch):
+@pytest.mark.parametrize("no_reuse", [False, True])
+def test_quota_reclaim_respects_observed_return_interval(monkeypatch, no_reuse):
     import vllm.v1.core.quota_serve as quota_module
 
     clock = [0.0]
     monkeypatch.setattr(
         quota_module, "time", SimpleNamespace(monotonic=lambda: clock[0])
     )
-    monkeypatch.setenv("EVICTION_POLICY", "quotaserve")
+    monkeypatch.setenv(
+        "EVICTION_POLICY", "quotaserve_no_reuse" if no_reuse else "quotaserve"
+    )
     pool = BlockPool(num_gpu_blocks=7, enable_caching=True, hash_block_size=16)
     policy = _adapter(pool)
     chat = pool.get_new_blocks(3, "chat")
@@ -220,6 +223,11 @@ def test_quota_reclaim_respects_observed_return_interval(monkeypatch):
     policy.mean_gap["agent"] = 1
     # Agent is at quota, but its prefix has not had a chance to return yet.
     clock[0] = 10.5
+    if no_reuse:
+        assert pool.get_new_blocks(1, "agent") == agent[:1]
+        assert pool.take_eviction_counts() == {"quotaserve": 1}
+        assert policy.mean_gap == {"agent": 1}
+        return
     assert pool.get_new_blocks(1, "agent") == chat[:1]
     assert pool.take_eviction_counts() == {"quotaserve_reuse": 1}
     # Once the observed interval passes, ordinary quota enforcement resumes.
@@ -517,14 +525,17 @@ def test_return_gap_variance_is_observed_and_reset(monkeypatch):
     assert not policy.gap_variance
 
 
-def test_expired_session_cache_is_reclaimed_before_live_prefix(monkeypatch):
+@pytest.mark.parametrize("no_retired", [False, True])
+def test_expired_session_cache_is_reclaimed_before_live_prefix(monkeypatch, no_retired):
     import vllm.v1.core.quota_serve as quota_module
 
     clock = [0.0]
     monkeypatch.setattr(
         quota_module, "time", SimpleNamespace(monotonic=lambda: clock[0])
     )
-    monkeypatch.setenv("EVICTION_POLICY", "quotaserve")
+    monkeypatch.setenv(
+        "EVICTION_POLICY", "quotaserve_no_retired" if no_retired else "quotaserve"
+    )
     pool = BlockPool(num_gpu_blocks=5, enable_caching=True, hash_block_size=16)
     policy = _adapter(pool)
     saved = {}
@@ -540,9 +551,43 @@ def test_expired_session_cache_is_reclaimed_before_live_prefix(monkeypatch):
     policy.mean_gap["agent"] = 1
     clock[0] = 6
     policy._refresh_quotas()
+    if no_retired:
+        assert pool.get_new_blocks(1, "chat") == saved["chat"][-1:]
+        assert pool.take_eviction_counts() == {"quotaserve": 1}
+        assert ("agent", "a") not in policy._waiting_sessions
+        assert policy._expired_free
+        return
     assert pool.get_new_blocks(1, "chat") == saved["agent"][-1:]
     assert all(b.block_hash is not None for b in saved["chat"])
     assert pool.take_eviction_counts() == {"quotaserve_retired": 1}
+
+
+@pytest.mark.parametrize("active_only", [False, True])
+def test_active_only_ablation_keeps_session_lifecycle(monkeypatch, active_only):
+    import vllm.v1.core.quota_serve as quota_module
+
+    clock = [0.0]
+    monkeypatch.setattr(
+        quota_module, "time", SimpleNamespace(monotonic=lambda: clock[0])
+    )
+    monkeypatch.setenv(
+        "EVICTION_POLICY", "quotaserve_active_only" if active_only else "quotaserve"
+    )
+    pool = BlockPool(num_gpu_blocks=101, enable_caching=True, hash_block_size=16)
+    policy = _adapter(pool)
+    for session in ("a", "b", "c"):
+        policy.on_request_start("chat", session)
+        policy.observe_demand("chat", 10, session)
+        policy.on_request_finish("chat", session)
+    policy.on_request_start("agent", "a", 20)
+    policy.observe_demand("agent", 20, "a")
+    assert policy.quotas == {"chat": 10 if active_only else 30, "agent": 20}
+    assert len(policy._waiting_sessions) == 3
+    clock[0] = 20
+    policy.on_request_start("chat", "a")
+    assert policy.mean_gap["chat"] == 20
+    assert len(policy._waiting_sessions) == 2
+    assert policy.quotas == {"chat": 10 if active_only else 30, "agent": 20}
 
 
 @pytest.mark.parametrize("shared_tail", [False, True])

@@ -3,6 +3,7 @@
 """Exercise the V1 seam and optionally compare pinned upstream source."""
 
 import ast
+import json
 import logging
 import math
 import os
@@ -74,9 +75,9 @@ def test_lookup_is_counted_once_including_misses_and_reset(monkeypatch):
     pool, _ = make_pool(monkeypatch)
     policy = pool.eviction_policy
     chat, agent = Mock(application_id="chat"), Mock(application_id="agent")
-    policy.on_prefix_lookup(chat, 32)
-    policy.on_prefix_lookup(chat, 64)
-    policy.on_prefix_lookup(agent, 0)
+    policy.on_request_scheduled(chat, 32)
+    policy.on_request_scheduled(chat, 64)
+    policy.on_request_scheduled(agent, 0)
     assert policy.step == 2
     assert list(policy.hit_history["chat"]) == [32 * 0.95]
     assert list(policy.hit_history["agent"]) == [0]
@@ -105,7 +106,54 @@ def test_external_invalidation_and_reused_physical_ids(monkeypatch):
 def test_unknown_task_fails_instead_of_silently_using_lru(monkeypatch):
     pool, _ = make_pool(monkeypatch, 1)
     with pytest.raises(ValueError, match="application_id"):
-        pool.eviction_policy.on_prefix_lookup(Mock(application_id="other"), 0)
+        pool.eviction_policy.on_request_scheduled(Mock(application_id="other"), 0)
+
+
+def test_waiting_lookup_does_not_update_admitted_request_statistics(
+    monkeypatch, tmp_path
+):
+    from vllm.platforms import current_platform
+
+    if not current_platform.device_type:
+        pytest.skip("Scheduler integration needs a configured vLLM device platform")
+    from tests.v1.core.utils import create_requests, create_scheduler
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["LlamaForCausalLM"],
+                "model_type": "llama",
+                "hidden_size": 32,
+                "intermediate_size": 64,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 2,
+                "max_position_embeddings": 128,
+                "vocab_size": 128,
+            }
+        )
+    )
+    monkeypatch.setenv("EVICTION_POLICY", "unicache")
+    scheduler = create_scheduler(
+        model=str(tmp_path),
+        num_blocks=4,
+        max_num_seqs=2,
+        max_num_batched_tokens=64,
+        max_model_len=128,
+        enable_prefix_caching=True,
+        skip_tokenizer_init=True,
+    )
+    requests = create_requests(2, num_tokens=32)
+    for request in requests:
+        request.application_id = "chat"
+        scheduler.add_request(request)
+    policy = scheduler.kv_cache_manager.block_pool.eviction_policy
+    assert policy.step == 0
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 1
+    assert len(scheduler.waiting) == 1
+    assert policy.step == 1
+    assert list(policy.hit_history["chat"]) == [0]
 
 
 @pytest.mark.skipif(
@@ -227,7 +275,7 @@ def test_matches_upstream_victims_weights_and_hit_history(monkeypatch):
             i,
         )
         namespace["update_hit_rates"](simulator, name, hits, 128)
-        policy.on_prefix_lookup(request, hits)
+        policy.on_request_scheduled(request, hits)
         expected, _ = reference.evict()
         block = pool.get_new_blocks(1)[0]
         assert block.block_id == expected

@@ -29,7 +29,7 @@ class QuotaServeAdapter:
 
     tracks_sessions = True
 
-    def on_prefix_lookup(self, request: Request, hit_tokens: int) -> None:
+    def on_request_scheduled(self, request: Request, hit_tokens: int) -> None:
         pass
 
     def __init__(

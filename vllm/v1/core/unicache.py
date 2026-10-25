@@ -31,7 +31,7 @@ class UniCacheAdapter:
 
     Only zero-reference blocks are candidates; uncached space wins. Freeing
     the final reference records the last-use timestamp available at this V1
-    seam. on_prefix_lookup records each request once, including zero hits.
+    seam. on_request_scheduled records each request once, including zero hits.
     """
 
     tracks_sessions = False
@@ -76,7 +76,7 @@ class UniCacheAdapter:
         self.metadata[block.block_id] = (app, prefix_tokens)
         self.uncached.pop(block.block_id, None)
 
-    def on_prefix_lookup(self, request: Request, hit_tokens: int) -> None:
+    def on_request_scheduled(self, request: Request, hit_tokens: int) -> None:
         if request in self.seen_requests:
             return
         app = request.application_id

@@ -859,6 +859,13 @@ class Scheduler(SchedulerInterface):
             if step_skipped_waiting:
                 self.skipped_waiting.prepend_requests(step_skipped_waiting)
 
+        # UniCache observes first-admitted requests after the batch's allocations,
+        # matching the upstream scheduler rather than counting waiting lookups.
+        policy = self.kv_cache_manager.block_pool.eviction_policy
+        if policy is not None:
+            for request in scheduled_new_reqs + scheduled_resumed_reqs:
+                policy.on_request_scheduled(request, request.num_computed_tokens)
+
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens

@@ -27,7 +27,7 @@ class BlockEvictionPolicy(Protocol):
     def on_cached(
         self, block: KVCacheBlock, request: Request, prefix_tokens: int = 0
     ) -> None: ...
-    def on_prefix_lookup(self, request: Request, hit_tokens: int) -> None: ...
+    def on_request_scheduled(self, request: Request, hit_tokens: int) -> None: ...
     def take_free_block(
         self, application_id: str | None = None
     ) -> tuple[KVCacheBlock, str | None]: ...
@@ -80,7 +80,7 @@ class RankedEvictionAdapter:
         self.frequency[block.block_id] = 1
         self.order[block.block_id] = self.clock
 
-    def on_prefix_lookup(self, request, hit_tokens):
+    def on_request_scheduled(self, request, hit_tokens):
         pass
 
     def _remove(self, block):

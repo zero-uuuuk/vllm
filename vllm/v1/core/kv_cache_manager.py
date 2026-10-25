@@ -220,10 +220,6 @@ class KVCacheManager:
                 preempted=request.num_preemptions > 0,
             )
 
-        if self.block_pool.eviction_policy is not None:
-            self.block_pool.eviction_policy.on_prefix_lookup(
-                request, num_new_computed_tokens
-            )
         return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
 
     def can_fit_full_sequence(

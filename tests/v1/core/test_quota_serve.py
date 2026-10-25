@@ -198,17 +198,25 @@ def test_pinned_excess_reports_pressure_fallback(monkeypatch) -> None:
     assert pool.take_eviction_counts() == {"quotaserve_pressure": 1}
 
 
-@pytest.mark.parametrize("no_reuse", [False, True])
-def test_quota_reclaim_respects_observed_return_interval(monkeypatch, no_reuse):
+@pytest.mark.parametrize(
+    "policy_name,no_reuse",
+    [
+        ("quotaserve", False),
+        ("quotaserve_no_reuse", True),
+        ("quotaserve_no_retired", False),
+        ("quotaserve_no_retired_no_reuse", True),
+    ],
+)
+def test_quota_reclaim_respects_observed_return_interval(
+    monkeypatch, policy_name, no_reuse
+):
     import vllm.v1.core.quota_serve as quota_module
 
     clock = [0.0]
     monkeypatch.setattr(
         quota_module, "time", SimpleNamespace(monotonic=lambda: clock[0])
     )
-    monkeypatch.setenv(
-        "EVICTION_POLICY", "quotaserve_no_reuse" if no_reuse else "quotaserve"
-    )
+    monkeypatch.setenv("EVICTION_POLICY", policy_name)
     pool = BlockPool(num_gpu_blocks=7, enable_caching=True, hash_block_size=16)
     policy = _adapter(pool)
     chat = pool.get_new_blocks(3, "chat")
@@ -525,17 +533,25 @@ def test_return_gap_variance_is_observed_and_reset(monkeypatch):
     assert not policy.gap_variance
 
 
-@pytest.mark.parametrize("no_retired", [False, True])
-def test_expired_session_cache_is_reclaimed_before_live_prefix(monkeypatch, no_retired):
+@pytest.mark.parametrize(
+    "policy_name,no_retired",
+    [
+        ("quotaserve", False),
+        ("quotaserve_no_retired", True),
+        ("quotaserve_no_retired_active_only", True),
+        ("quotaserve_no_retired_no_reuse", True),
+    ],
+)
+def test_expired_session_cache_is_reclaimed_before_live_prefix(
+    monkeypatch, policy_name, no_retired
+):
     import vllm.v1.core.quota_serve as quota_module
 
     clock = [0.0]
     monkeypatch.setattr(
         quota_module, "time", SimpleNamespace(monotonic=lambda: clock[0])
     )
-    monkeypatch.setenv(
-        "EVICTION_POLICY", "quotaserve_no_retired" if no_retired else "quotaserve"
-    )
+    monkeypatch.setenv("EVICTION_POLICY", policy_name)
     pool = BlockPool(num_gpu_blocks=5, enable_caching=True, hash_block_size=16)
     policy = _adapter(pool)
     saved = {}
@@ -562,17 +578,25 @@ def test_expired_session_cache_is_reclaimed_before_live_prefix(monkeypatch, no_r
     assert pool.take_eviction_counts() == {"quotaserve_retired": 1}
 
 
-@pytest.mark.parametrize("active_only", [False, True])
-def test_active_only_ablation_keeps_session_lifecycle(monkeypatch, active_only):
+@pytest.mark.parametrize(
+    "policy_name,active_only",
+    [
+        ("quotaserve", False),
+        ("quotaserve_active_only", True),
+        ("quotaserve_no_retired", False),
+        ("quotaserve_no_retired_active_only", True),
+    ],
+)
+def test_active_only_ablation_keeps_session_lifecycle(
+    monkeypatch, policy_name, active_only
+):
     import vllm.v1.core.quota_serve as quota_module
 
     clock = [0.0]
     monkeypatch.setattr(
         quota_module, "time", SimpleNamespace(monotonic=lambda: clock[0])
     )
-    monkeypatch.setenv(
-        "EVICTION_POLICY", "quotaserve_active_only" if active_only else "quotaserve"
-    )
+    monkeypatch.setenv("EVICTION_POLICY", policy_name)
     pool = BlockPool(num_gpu_blocks=101, enable_caching=True, hash_block_size=16)
     policy = _adapter(pool)
     for session in ("a", "b", "c"):

@@ -39,9 +39,23 @@ class QuotaServeAdapter:
         *,
         ablation: str | None = None,
     ) -> None:
-        if ablation not in (None, "active_only", "no_retired", "no_reuse"):
+        if ablation not in (
+            None,
+            "active_only",
+            "no_retired",
+            "no_reuse",
+            "no_retired_active_only",
+            "no_retired_no_reuse",
+        ):
             raise ValueError(f"Unknown QuotaServe ablation: {ablation}")
         self.ablation = ablation
+        self._active_only = ablation in ("active_only", "no_retired_active_only")
+        self._prioritize_retired = ablation not in (
+            "no_retired",
+            "no_retired_active_only",
+            "no_retired_no_reuse",
+        )
+        self._guard_reuse = ablation not in ("no_reuse", "no_retired_no_reuse")
         try:
             apps = json.loads(os.getenv("QUOTASERVE_APPS", ""))
         except (ValueError, TypeError) as exc:
@@ -227,7 +241,7 @@ class QuotaServeAdapter:
         observed: Counter[str] = Counter()
         known: Counter[str] = Counter()
         for key in self._session_demands.keys() | self._prompt_demands.keys():
-            if self.ablation == "active_only" and key not in self._active_sessions:
+            if self._active_only and key not in self._active_sessions:
                 continue
             app, _ = key
             # The arrived prompt is already known; a growing context must not
@@ -240,7 +254,7 @@ class QuotaServeAdapter:
         scores = {}
         counts = (
             Counter(app for app, _ in self._active_sessions)
-            if self.ablation == "active_only"
+            if self._active_only
             else self.session_counts
         )
         for app in self.apps:
@@ -350,7 +364,7 @@ class QuotaServeAdapter:
         if self._free_uncached:
             block = next(iter(self._free_uncached.values()))
             reason = None
-        elif self._expired_free and self.ablation != "no_retired":
+        elif self._expired_free and self._prioritize_retired:
             block = next(iter(self._expired_free.values()))
             reason = "quotaserve_retired"
         else:
@@ -383,7 +397,7 @@ class QuotaServeAdapter:
                         gap + 2.0 * math.sqrt(self.gap_variance.get(owner, 0.0)),
                     )
                 if (
-                    self.ablation != "no_reuse"
+                    self._guard_reuse
                     and time.monotonic() - self._freed_at[head_id] < gap
                 ):
                     block = self.free_block_queue.fake_free_list_head.next_free_block

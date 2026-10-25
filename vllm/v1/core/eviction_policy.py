@@ -154,6 +154,12 @@ _POLICY_ADAPTERS: dict[
     "quotaserve_active_only": partial(QuotaServeAdapter, ablation="active_only"),
     "quotaserve_no_retired": partial(QuotaServeAdapter, ablation="no_retired"),
     "quotaserve_no_reuse": partial(QuotaServeAdapter, ablation="no_reuse"),
+    "quotaserve_no_retired_active_only": partial(
+        QuotaServeAdapter, ablation="no_retired_active_only"
+    ),
+    "quotaserve_no_retired_no_reuse": partial(
+        QuotaServeAdapter, ablation="no_retired_no_reuse"
+    ),
     "unicache": UniCacheAdapter,
     "fifo": partial(RankedEvictionAdapter, mode="fifo"),
     "lfu": partial(RankedEvictionAdapter, mode="lfu"),

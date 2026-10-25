@@ -20,17 +20,22 @@ at this seam; no simulator globals or future request information are used.
 Only unreferenced blocks are candidates, and uncached free space takes priority.
 Reset clears statistics, queue weights and candidate metadata.
 
-Three registered policies use the same `QuotaServeAdapter`:
+The registered policies use the same `QuotaServeAdapter`:
 
 | Policy | Removed behavior | Preserved behavior |
 | --- | --- | --- |
 | `quotaserve_active_only` | Waiting sessions in demand aggregation | Lifecycle, gaps, fallback demand, block links |
 | `quotaserve_no_retired` | Retired-block priority | Retirement tracking, ordinary candidate eligibility |
 | `quotaserve_no_reuse` | Return-gap guard | Quotas, retirement, gap tracking, pressure fallback |
+| `quotaserve_no_retired_active_only` | Retired priority and waiting sessions in demand | Lifecycle, gaps, fallback demand, block links, reuse guard |
+| `quotaserve_no_retired_no_reuse` | Retired priority and return-gap guard | Idle demand, quotas, gap tracking, ordinary eligibility, pressure fallback |
 
-`quotaserve` retains the existing full policy. No combinations of ablations
-are exposed. The same application cache salts and BlockPool allocation rules
-apply to every policy.
+The submission's reference configuration is `quotaserve_no_retired`. Compare it
+with the final two rows to remove idle demand or the reuse guard one at a time,
+while keeping retired priority disabled in all three runs. The historical names,
+including `quotaserve` with retired priority, retain their original behavior for
+reproducing earlier measurements. The same application cache salts and BlockPool
+allocation rules apply to every policy.
 
 Policy tests run without GPU inference. For upstream parity, download
 `vllm/core/evictor.py` and `vllm/simulator/output_simulator.py` from the pinned

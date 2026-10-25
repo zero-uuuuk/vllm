@@ -282,7 +282,9 @@ class BlockPool:
             blk.block_hash = block_hash_with_group_id
             if self.eviction_policy is not None:
                 # 새 full prefix가 캐시에 등록될 때 현재 요청을 owner로 기록한다.
-                self.eviction_policy.on_cached(blk, request)
+                self.eviction_policy.on_cached(
+                    blk, request, (num_cached_blocks + i + 1) * block_size
+                )
             self.cached_block_hash_to_block.insert(block_hash_with_group_id, blk)
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))

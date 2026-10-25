@@ -29,9 +29,19 @@ class QuotaServeAdapter:
 
     tracks_sessions = True
 
+    def on_request_scheduled(self, request: Request, hit_tokens: int) -> None:
+        pass
+
     def __init__(
-        self, blocks: list[KVCacheBlock], free_block_queue: FreeKVCacheBlockQueue
+        self,
+        blocks: list[KVCacheBlock],
+        free_block_queue: FreeKVCacheBlockQueue,
+        *,
+        ablation: str | None = None,
     ) -> None:
+        if ablation not in (None, "active_only", "no_retired", "no_reuse"):
+            raise ValueError(f"Unknown QuotaServe ablation: {ablation}")
+        self.ablation = ablation
         try:
             apps = json.loads(os.getenv("QUOTASERVE_APPS", ""))
         except (ValueError, TypeError) as exc:
@@ -217,6 +227,8 @@ class QuotaServeAdapter:
         observed: Counter[str] = Counter()
         known: Counter[str] = Counter()
         for key in self._session_demands.keys() | self._prompt_demands.keys():
+            if self.ablation == "active_only" and key not in self._active_sessions:
+                continue
             app, _ = key
             # The arrived prompt is already known; a growing context must not
             # wait until completion to correct its previous-turn estimate.
@@ -226,8 +238,13 @@ class QuotaServeAdapter:
             observed[app] += footprint
             known[app] += 1
         scores = {}
+        counts = (
+            Counter(app for app, _ in self._active_sessions)
+            if self.ablation == "active_only"
+            else self.session_counts
+        )
         for app in self.apps:
-            unknown = max(1, self.session_counts[app]) - known[app]
+            unknown = max(1, counts[app]) - known[app]
             scores[app] = max(
                 1, math.ceil(observed[app] + unknown * self.mean_demand.get(app, prior))
             )
@@ -265,7 +282,9 @@ class QuotaServeAdapter:
         self._owners[block.block_id] = app
         self.resident[app] += 1
 
-    def on_cached(self, block: KVCacheBlock, request: Request) -> None:
+    def on_cached(
+        self, block: KVCacheBlock, request: Request, prefix_tokens: int = 0
+    ) -> None:
         block.owner = request.application_id
         self.on_allocate(block, request.application_id)
 
@@ -331,7 +350,7 @@ class QuotaServeAdapter:
         if self._free_uncached:
             block = next(iter(self._free_uncached.values()))
             reason = None
-        elif self._expired_free:
+        elif self._expired_free and self.ablation != "no_retired":
             block = next(iter(self._expired_free.values()))
             reason = "quotaserve_retired"
         else:
@@ -363,7 +382,10 @@ class QuotaServeAdapter:
                         self._session_timeout(owner),
                         gap + 2.0 * math.sqrt(self.gap_variance.get(owner, 0.0)),
                     )
-                if time.monotonic() - self._freed_at[head_id] < gap:
+                if (
+                    self.ablation != "no_reuse"
+                    and time.monotonic() - self._freed_at[head_id] < gap
+                ):
                     block = self.free_block_queue.fake_free_list_head.next_free_block
                     assert block is not None
                     reason = "quotaserve_reuse"
